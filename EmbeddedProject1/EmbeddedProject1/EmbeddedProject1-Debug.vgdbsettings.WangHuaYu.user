@@ -1,0 +1,86 @@
+<?xml version="1.0"?>
+<VisualGDBUserPreferences xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <UserDefinedVariableValues />
+  <DebugPreferences xsi:type="com.visualgdb.debug.embedded.preferences">
+    <CatchpointConfiguration>
+      <Exec>false</Exec>
+      <Fork>false</Fork>
+      <Vfork>false</Vfork>
+      <Syscalls />
+      <CXXCatchpoints />
+    </CatchpointConfiguration>
+    <VisualWatches>
+      <VisualWatch>
+        <Expression>debug_angle</Expression>
+        <VisualizerID>com.sysprogs.imagewatch</VisualizerID>
+      </VisualWatch>
+    </VisualWatches>
+    <VisualWatchPreferences>
+      <DefaultProvider>com.sysprogs.imagewatch</DefaultProvider>
+      <ProviderPreferences>
+        <VisualWatchProviderPreferences>
+          <ProviderID>com.sysprogs.imagewatch</ProviderID>
+          <Preferences>
+            <ViewMode>ZoomedOut</ViewMode>
+            <Defaults />
+          </Preferences>
+        </VisualWatchProviderPreferences>
+      </ProviderPreferences>
+    </VisualWatchPreferences>
+    <MaskInterruptsWhileStepping>false</MaskInterruptsWhileStepping>
+    <MemoryWindowPreferences />
+    <RealTimeWatchPreferences>
+      <Presets />
+      <ImplicitPreset>
+        <Watches />
+      </ImplicitPreset>
+      <StopOnOverflow>false</StopOnOverflow>
+    </RealTimeWatchPreferences>
+    <LiveVariables>
+      <LiveVariable>
+        <Expression>debug_temp</Expression>
+        <Enabled>true</Enabled>
+        <Breakpoint>
+          <ComparisonMode>Equals</ComparisonMode>
+          <Enabled>false</Enabled>
+        </Breakpoint>
+        <Plot>false</Plot>
+        <IsCollapsed>false</IsCollapsed>
+        <IsFavorite>false</IsFavorite>
+      </LiveVariable>
+      <LiveVariable>
+        <Expression>g_can_rx_data</Expression>
+        <Type>com.sysprogs.fixed</Type>
+        <Enabled>true</Enabled>
+        <Breakpoint>
+          <ComparisonMode>Equals</ComparisonMode>
+          <Enabled>false</Enabled>
+        </Breakpoint>
+        <Plot>false</Plot>
+        <IsCollapsed>false</IsCollapsed>
+        <IsFavorite>false</IsFavorite>
+      </LiveVariable>
+    </LiveVariables>
+    <LoadGlobalsWithoutConfirmation>false</LoadGlobalsWithoutConfirmation>
+    <NestedLiveVariables>
+      <NestedVariableSettingsCollection>
+        <ID>com.sysprogs.AllGlobals</ID>
+        <Variables />
+      </NestedVariableSettingsCollection>
+      <NestedVariableSettingsCollection>
+        <ID>com.sysprogs.SpecificVariables</ID>
+        <Variables />
+      </NestedVariableSettingsCollection>
+      <NestedVariableSettingsCollection>
+        <ID>com.sysprogs.Custom</ID>
+        <Variables />
+      </NestedVariableSettingsCollection>
+    </NestedLiveVariables>
+    <LiveVariablePreferences>
+      <ViewMode>SpecificVariables</ViewMode>
+      <FavoritesOnly>false</FavoritesOnly>
+    </LiveVariablePreferences>
+    <Suggestions />
+    <HardwareRegisters />
+  </DebugPreferences>
+</VisualGDBUserPreferences>

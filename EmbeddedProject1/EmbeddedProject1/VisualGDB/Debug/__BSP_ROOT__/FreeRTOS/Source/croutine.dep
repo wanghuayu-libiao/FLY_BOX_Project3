@@ -1,0 +1,38 @@
+VisualGDB/Debug/__BSP_ROOT__/FreeRTOS/Source/croutine.o: \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/croutine.c \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/FreeRTOS.h \
+ C:/SysGCC/arm-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stddef.h \
+ C:/SysGCC/arm-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdint.h \
+ C:/SysGCC/arm-eabi/arm-none-eabi/include/stdint.h \
+ C:/SysGCC/arm-eabi/arm-none-eabi/include/machine/_default_types.h \
+ C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/features.h \
+ C:/SysGCC/arm-eabi/arm-none-eabi/include/_newlib_version.h \
+ C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/_intsup.h \
+ C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/_stdint.h \
+ D:/AGV_Car_Project2/EmbeddedProject1/EmbeddedProject1/FreeRTOSConfig.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/projdefs.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/portable.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/deprecated_definitions.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Portable/gcc/ARM_CM3/portmacro.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/mpu_wrappers.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/task.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/list.h \
+ C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/croutine.h
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/FreeRTOS.h:
+C:/SysGCC/arm-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stddef.h:
+C:/SysGCC/arm-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stdint.h:
+C:/SysGCC/arm-eabi/arm-none-eabi/include/stdint.h:
+C:/SysGCC/arm-eabi/arm-none-eabi/include/machine/_default_types.h:
+C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/features.h:
+C:/SysGCC/arm-eabi/arm-none-eabi/include/_newlib_version.h:
+C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/_intsup.h:
+C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/_stdint.h:
+D:/AGV_Car_Project2/EmbeddedProject1/EmbeddedProject1/FreeRTOSConfig.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/projdefs.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/portable.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/deprecated_definitions.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Portable/gcc/ARM_CM3/portmacro.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/mpu_wrappers.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/task.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/list.h:
+C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/croutine.h:
