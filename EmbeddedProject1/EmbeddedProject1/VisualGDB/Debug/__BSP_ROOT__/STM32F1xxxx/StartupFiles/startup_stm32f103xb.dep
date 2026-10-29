@@ -1,4 +1,0 @@
-VisualGDB/Debug/__BSP_ROOT__/STM32F1xxxx/StartupFiles/startup_stm32f103xb.o: \
- C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/STM32F1xxxx/StartupFiles/startup_stm32f103xb.c \
- C:/SysGCC/arm-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stddef.h
-C:/SysGCC/arm-eabi/lib/gcc/arm-none-eabi/15.2.1/include/stddef.h:

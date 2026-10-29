@@ -1,50 +1,87 @@
 # ============================================================================
-#  飞箱课题三 —— 只跟踪源码与工程配置，编译产物一律不进仓库
+#  课题三 · 飞箱（FLY_BOX_Project3）
+#  只把「源码 + 工程配置」放进仓库，编译产物和本机状态一律排除。
+#
+#  规则写法说明：
+#    带斜杠的规则若斜杠出现在【中间】（如 a/b），会锚定到仓库根目录，
+#    所以这里统一不写中间斜杠，让它对任意层级都生效。
+#    带尾部斜杠（如 Debug/）只匹配目录，对任意层级生效。
 # ============================================================================
 
-# ---- Visual Studio 用户态 / 缓存 ----
+# ---------- Visual Studio 本机状态与缓存 ----------
 .vs/
 *.suo
 *.user
 *.sdf
 *.opensdf
+*.opendb
 *.VC.db
 *.VC.VC.opendb
 *.vsidx
 *.ipch
+*.dbmdl
+*.psess
+*.vsp
+*.vspx
+*.ncb
+*.aps
 DocumentLayout*.json
+VSWorkspaceState.json
+ProjectSettings.json
 
-# ---- VisualGDB 编译输出与代码库缓存 ----
+# ---------- VisualGDB 编译输出 ----------
+# 整个 VisualGDB 目录（含 Debug / Release / 各中间文件），任意层级
+VisualGDB/
 .visualgdb/
-VisualGDB/Debug/
-VisualGDB/Release/
 *.o
 *.d
 *.dep
 *.rsp
+*.alldeps
+*.dwarfcache
+*.progstat
+PreviousBinaryVersions/
+NodeFlags.dat
+
+# ---------- 可执行与烧录产物 ----------
 *.bin
 *.hex
 *.elf
+*.axf
+*.out
 *.map
 *.list
 *.lst
-*.alldeps
-*.vgdbtrace
-TraceReports/
+*.lss
+*.sym
+*.pdb
+*.ilk
+*.exp
+*.lib
 
-# ---- 构建中间目录（常见命名）----
+# ---------- 调试 / 追踪报告 ----------
+TraceReports/
+*.vgdbtrace
+
+# ---------- 通用构建输出目录 ----------
 Debug/
 Release/
-x64/
 obj/
 bin/
+x64/
+x86/
+build/
 
-# ---- 系统 ----
+# ---------- 系统文件 ----------
 Thumbs.db
 desktop.ini
 .DS_Store
 
-# ---- 编辑器临时文件 ----
+# ---------- 编辑器临时文件 ----------
 *.swp
+*.swo
 *~
 *.tmp
+*.bak
+*.orig
+*.rej
