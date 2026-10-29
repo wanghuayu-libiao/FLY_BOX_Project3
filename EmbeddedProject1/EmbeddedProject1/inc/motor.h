@@ -116,6 +116,74 @@ int16_t Motor_GetTorque(uint8_t idx);
 uint8_t Motor_HasQueryPos(uint8_t idx);      /* 1 = 收到过 0x0409 位置查询应答 */
 int32_t Motor_GetQueryPos(uint8_t idx);      /* 电机自报绝对位置 0.1mm */
 
+/* ------------------------------------------------------------------
+ *  ★ 课题三·飞箱：按「物理设备号」直接访问（不经过左/右轮索引）
+ *
+ *  为什么必须单独一组：
+ *    小车那两台是固件「主动写」设备号 0/1，所以可以用 MOTOR_LEFT / MOTOR_RIGHT
+ *    这种索引。飞箱的 5 台电机设备号出厂固定且不是 0/1，固件只能「读」不能改，
+ *    所以一切访问必须直接用设备号。
+ *
+ *  ★ 设备号有效范围 0..15（内部缓存数组长度 MOTOR_DEV_SLOTS = 16）。
+ *    飞箱的设备号必须在这个范围里，否则下面这些接口一律返回 0/无数据。
+ * ------------------------------------------------------------------ */
+
+/** @brief 按设备号发查询（0x0408 的 B1 = query_type），不需要先登记配置表 */
+uint8_t  Motor_SendQueryDev(uint8_t dev, uint8_t query_type);
+
+/**
+  * @brief  ★ 按 SN 绑定设备号：0x0313，数据 = [SN0..SN6, 设备号]，DLC=8
+  *
+  *         ★★★ 为什么这条是飞箱的核心 ★★★
+  *           协议里【没有】「查询设备号」的命令（能查的只有温度/位置/状态/版本），
+  *           所以 5 台电机如果出厂都是 0 号，靠听反馈帧永远分不清谁是谁
+  *           （CAN 位仲裁会把「同 ID 同数据」的帧合并成一帧）。
+  *
+  *           但 0x0313 是按 SN 寻址的：只有 SN 完全匹配的那一台会接受。
+  *           所以只要知道每台的 SN（电机标签上印着），就能把 5 台一次性
+  *           分别绑到 0/1/2/3/4，全程不需要逐台上电、不会误伤别的电机。
+  *
+  *         ★ 与 0x0316 的关系：
+  *           0x0313 负责「能被哪台收到」，0x0316 负责「Data[4] 用哪个号寻址」。
+  *           飞箱里两者填同一个值（见 flybox.h 的 FLY_MOTOR_NO_EQ_DEV）。
+  *
+  * @param  sn7  7 字节 SN（最后一位通常是 0x00）
+  * @param  dev  目标设备号 0..15
+  * @retval 0 成功，1 参数非法或发送失败
+  */
+uint8_t  Motor_SendBindSn(const uint8_t *sn7, uint8_t dev);
+
+/**
+  * @brief  按设备号写电机参数：0x0316，数据 = [B4 BF CF AA 00 5F, Byte6, 设备号]
+  *         Byte6 低 4 位 = motor_no（★ 必须填这台电机【当前自己的】号，保持原值）
+  *         Byte6 bit5/bit4 = 0 -> 自动回传剩余位移 / 力矩
+  * @retval 0 成功，1 参数非法或发送失败
+  */
+uint8_t  Motor_SendParamDev(uint8_t dev, uint8_t motor_no);
+
+/** @brief 该设备号是否收到过剩余位移反馈（0x0420）*/
+uint8_t  Motor_HasRemainDev(uint8_t dev);
+
+/** @brief 该设备号的剩余位移 0.1mm（0 = 已到位）*/
+int32_t  Motor_GetRemainDev(uint8_t dev);
+
+/** @brief 该设备号是否收到过位置查询应答（0x0409 B1=0x08）*/
+uint8_t  Motor_HasQueryPosDev(uint8_t dev);
+
+/** @brief 该设备号自报的绝对位置 0.1mm */
+int32_t  Motor_GetQueryPosDev(uint8_t dev);
+
+/**
+  * @brief  该设备号累计收到多少帧（0x0420 / 0x0440 / 0x0380 / 0x0409）
+  *         ★ 设备号扫描的核心依据：先清零（Motor_ClearFbCount），
+  *           再逐个设备号发查询，帧数从 0 变成非 0 的，就是真实存在的设备。
+  *         比「LED/蜂鸣器反推」安全得多，因为它只是一次读操作。
+  */
+uint32_t Motor_GetFbCountDev(uint8_t dev);
+
+/** @brief 把所有设备号的接收帧计数清零（扫描前调用）*/
+void     Motor_ClearFbCount(void);
+
 /* 反馈帧序号：每收到一帧该电机的 0x0420 / 0x0409 就 +1。
  * 用它可以判断"是否来了一帧新的反馈"，避免把旧值当成新值重复使用。 */
 uint32_t Motor_GetFeedbackSeq(uint8_t idx);

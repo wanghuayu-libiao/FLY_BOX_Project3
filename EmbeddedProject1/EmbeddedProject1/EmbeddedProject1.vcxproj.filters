@@ -78,6 +78,12 @@
     <ClCompile Include="src\car_bringup.c">
       <Filter>Source files</Filter>
     </ClCompile>
+    <ClCompile Include="src\tof8.c">
+      <Filter>Source files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\flybox.c">
+      <Filter>Source files</Filter>
+    </ClCompile>
     <None Include="stm32.props">
       <Filter>Source files\Device-specific files</Filter>
     </None>
@@ -337,6 +343,12 @@
       <Filter>Header files</Filter>
     </ClInclude>
     <ClInclude Include="inc\car_cfg.h">
+      <Filter>Header files</Filter>
+    </ClInclude>
+    <ClInclude Include="inc\tof8.h">
+      <Filter>Header files</Filter>
+    </ClInclude>
+    <ClInclude Include="inc\flybox.h">
       <Filter>Header files</Filter>
     </ClInclude>
     <ClInclude Include="$(BSP_ROOT)\FreeRTOS\Source\CMSIS_RTOS\cmsis_os.h">

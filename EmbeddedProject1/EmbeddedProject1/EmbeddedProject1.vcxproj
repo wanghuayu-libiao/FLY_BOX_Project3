@@ -74,6 +74,8 @@
     <ClCompile Include="src\motor.c" />
     <ClCompile Include="src\car.c" />
     <ClCompile Include="src\car_bringup.c" />
+    <ClCompile Include="src\tof8.c" />
+    <ClCompile Include="src\flybox.c" />
     <None Include="stm32.props" />
     <ClCompile Include="$(BSP_ROOT)\STM32F1xxxx\StartupFiles\startup_stm32f103xb.c" />
     <None Include="$(BSP_ROOT)\FreeRTOS\License\license.txt" />
@@ -161,6 +163,8 @@
     <ClInclude Include="inc\car.h" />
     <ClInclude Include="inc\car_bringup.h" />
     <ClInclude Include="inc\car_cfg.h" />
+    <ClInclude Include="inc\tof8.h" />
+    <ClInclude Include="inc\flybox.h" />
     <ClInclude Include="$(BSP_ROOT)\FreeRTOS\Source\CMSIS_RTOS\cmsis_os.h" />
     <ClInclude Include="$(BSP_ROOT)\FreeRTOS\Source\include\croutine.h" />
     <ClInclude Include="$(BSP_ROOT)\FreeRTOS\Source\include\deprecated_definitions.h" />

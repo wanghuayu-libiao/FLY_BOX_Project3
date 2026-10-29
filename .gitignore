@@ -1,0 +1,50 @@
+# ============================================================================
+#  飞箱课题三 —— 只跟踪源码与工程配置，编译产物一律不进仓库
+# ============================================================================
+
+# ---- Visual Studio 用户态 / 缓存 ----
+.vs/
+*.suo
+*.user
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+*.vsidx
+*.ipch
+DocumentLayout*.json
+
+# ---- VisualGDB 编译输出与代码库缓存 ----
+.visualgdb/
+VisualGDB/Debug/
+VisualGDB/Release/
+*.o
+*.d
+*.dep
+*.rsp
+*.bin
+*.hex
+*.elf
+*.map
+*.list
+*.lst
+*.alldeps
+*.vgdbtrace
+TraceReports/
+
+# ---- 构建中间目录（常见命名）----
+Debug/
+Release/
+x64/
+obj/
+bin/
+
+# ---- 系统 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 编辑器临时文件 ----
+*.swp
+*~
+*.tmp

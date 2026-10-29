@@ -48,6 +48,9 @@
 #include "protocol.h"                   /* 上位机 CAN 报文定义 */
 #include "motor.h"                      /* 电机 CAN 协议层 + 非阻塞初始化（课题二） */
 #include "car_bringup.h"                /* 直发版双电机绑定 + 差速运动学（课题二 分步调机） */
+#include "tof8.h"                       /* 课题三·TOF8 激光测距（CAN 协议见 tof8通讯协议.docx） */
+#include "car_cfg.h"                    /* TOF8 设备号数量/距离上报周期等配置 */
+#include "flybox.h"                     /* 课题三·飞箱推拉箱：5 台电机 + 语义动作 */
 
 /* Private define ------------------------------------------------------------*/
 /* 测试模式宏开关 */
@@ -69,6 +72,17 @@
                                                  适配器是两个独立主站，同一 CAN 总线上谁后发
                                                  谁生效。只要固件还在跑 BRINGUP 序列，
                                                  上位机点的直行/转向就会被固件下一帧覆盖。*/
+#define TEST_MODE_TOF8      9               /* ★ 课题三·TOF8 测距自检：只发 0x0316 配置 +
+                                               0x0408 通道 10/12/15/16 请求，不碰电机、
+                                               不碰陀螺仪。距离每 100ms 用 0x7F8 上报，
+                                               用 CAN 分析仪就能看到毫米值。
+                                               ★ 电机一帧都不发：本模式只验证 TOF8 通信
+                                                 和测距，避免电机干扰排查。*/
+#define TEST_MODE_FLYBOX    10              /* ★ 课题三·飞箱机构调试：扫描 5 台电机设备号
+                                               -> 配参数/使能 -> 单轴点动 -> 语义动作。
+                                               ★ 上位机用 0x111 下发点动命令，
+                                                 不看调试器也能调；
+                                                 状态看 0x7F5/0x7F6/0x7F4 */
 
 /* ★★★ 课题四/五（往返测试、方形测试）不用在这里加新模式 ★★★
  *
@@ -86,14 +100,31 @@
 
 /* BRINGUP 模式的测试参数已全部改到 car_bringup.h（CAR_BU_SEQ_* 系列）*/
 
-#define CURRENT_TEST_MODE   TEST_MODE_BRINGUP   /* ★ 课题二两种跑法，改这一行切换：
-                                              *   TEST_MODE_HOST    = 上位机控车（固件只上报，
-                                              *                       电机交给 canable2 + 上位机）
-                                              *   TEST_MODE_BRINGUP = 脱机自检（固件自己跑
-                                              *                       前进/后退/左转/右转序列）
+#ifndef CURRENT_TEST_MODE
+/* ★★★ 烧录前必须确认这一行！★★★
+ *
+ *  这是整个工程唯一的模式开关。改错了，看到的永远是"完全没反应"：
+ *  固件在跑，但跑的是另一个课题的逻辑。
+ *
+ *  常见误判：
+ *    以为在跑飞箱，实际还是 TEST_MODE_BRINGUP
+ *      -> 走的是课题二小车逻辑，拿 car_cfg.h 里小车的 SN 去绑飞箱电机
+ *      -> SN 对不上，绑不上，0x0413 不生效 -> 电机不锁死
+ *      -> 方形测试发运动帧给设备号 0/1（飞箱是 7~11）-> 一帧都不动
+ *      -> 现象和「固件没跑」一模一样
+ *
+ *  当前应为 TEST_MODE_FLYBOX（课题三）。
+ */
+#define CURRENT_TEST_MODE   TEST_MODE_FLYBOX    /* ★ 课题三·飞箱：5 台电机 + TOF 闭环
                                               *
-                                              *   ★ 两者不能同时用：固件一旦自己发运动帧，
+                                              *   其它可选：
+                                              *     TEST_MODE_HOST    = 上位机控车
+                                              *     TEST_MODE_BRINGUP = 课题二脱机整车
+                                              *     TEST_MODE_TOF8    = 只验 TOF，不碰电机
+                                              *
+                                              *   ★ 三者不能同时用：固件一旦自己发运动帧，
                                               *     上位机的指令就会被覆盖（谁后发谁生效）。*/
+#endif
 
 /* ★★★ 拼写防护（别删）★★★
  *
@@ -115,13 +146,21 @@
         && (CURRENT_TEST_MODE != TEST_MODE_APP) \
         && (CURRENT_TEST_MODE != TEST_MODE_MOTOR) \
         && (CURRENT_TEST_MODE != TEST_MODE_BRINGUP) \
-        && (CURRENT_TEST_MODE != TEST_MODE_HOST))
+        && (CURRENT_TEST_MODE != TEST_MODE_HOST) \
+        && (CURRENT_TEST_MODE != TEST_MODE_TOF8) \
+        && (CURRENT_TEST_MODE != TEST_MODE_FLYBOX))
 #error "CURRENT_TEST_MODE 不是合法的测试模式（很可能宏名拼错了，检查 TEST_MODE_HOST / TEST_MODE_BRINGUP 的拼写）"
 #endif
 
 /* 任务间通知信号（CMSIS-RTOS v1 osSignal） */
 #define SIG_ANGLE_READY     0x01            /* Task_Angle -> Task_CanTx：新一帧角度算好了 */
 #define SIG_CAN_RX          0x01            /* CAN 接收中断 -> Task_CanRx：队列里有新帧 */
+
+/* 课题三·TOF8 自检任务参数 */
+#define TOF8_BOOT_WAIT_MS       800U        /* 上电等模块稳定（连续模式首次出数需要 >100ms）*/
+#define TOF8_CFG_GAP_MS         20U         /* 配置/开关帧之间的间隔 */
+#define TOF8_DIAG_PERIOD_MS     100U        /* 0x7F8 距离上报周期 */
+#define TOF8_RECHECK_PERIOD    20U          /* 每 N 个上报周期（=2s）补查一次设备号/分辨率/频率 */
 
 /* Global variables ----------------------------------------------------------*/
 /* Watch 变量（加入调试器 Watch 观察） */
@@ -142,6 +181,8 @@ osThreadId TaskCanRxHandle = NULL;
 osThreadId TaskMotorHandle = NULL;
 osThreadId TaskBringupHandle = NULL;
 osThreadId TaskHeartbeatHandle = NULL;
+osThreadId TaskTof8Handle = NULL;          /* 课题三·TOF8 测距轮询 */
+osThreadId TaskFlyboxHandle = NULL;        /* 课题三·飞箱机构调试 */
 
 /* BRINGUP 测试的进度已由 car_bringup.c 的 g_car_bu_seq_stage 提供：
  *   0=等待 1=直行 2=转向 3=停车 4=完成
@@ -360,9 +401,16 @@ static void Task_CanRx(void const *argument)
 
 		while (Can_RxPop(&f) != 0U)
 		{
-			/* 电机反馈/应答帧（0x0420+/0x0440+/0x0409/0x041A/0x0312/错误帧）
-			 * 非电机 ID 会被内部直接忽略，与下面的陀螺仪命令帧互不影响 */
-			Motor_OnFrame(&f);
+			/* ★ 顺序绝对不能反：TOF8 和电机共用 0x0409 应答 ID，
+			 *   TOF8 的通道 8（复位 VL53Lx）又正好等于 MOTOR_QUERY_POS。
+			 *   必须先让 Tof8_OnFrame() 按设备号「认领」自己的帧，返回 1 就不要再往下交，
+			 *   否则 TOF8 的复位应答会被 Motor_OnFrame() 当成「当前位置」写进缓存。*/
+			if (Tof8_OnFrame(&f) == 0U)
+			{
+				/* 电机反馈/应答帧（0x0420+/0x0440+/0x0409/0x041A/0x0312/错误帧）
+				 * 非电机 ID 会被内部直接忽略，与下面的陀螺仪命令帧互不影响 */
+				Motor_OnFrame(&f);
+			}
 
 			if ((f.id == PROTO_ID_CMD) && (f.dlc >= 1U))
 			{
@@ -377,6 +425,13 @@ static void Task_CanRx(void const *argument)
 				default:
 					break;
 				}
+			}
+
+			/* ★ 飞箱调试命令 0x111（上位机下发：点动 / 查位置 / 重扫设备号 / 语义动作）
+			 *   与陀螺仪命令 0x110 是不同 ID，互不影响。 */
+			if (f.id == FLY_ID_CMD)
+			{
+				Fly_OnCommand(f.data, f.dlc);
 			}
 		}
 	}
@@ -491,6 +546,400 @@ static void Task_Bringup(void const *argument)
 }
 
 /**
+  * @brief  课题三·TOF8 测距任务：配置 -> 开连续测量 -> 循环轮询 -> 上报
+  *
+  *         流程完全按《tof8通讯协议.docx》「二、流程」：
+  *             1) 开机发一次配置帧 0x0316（4x4 + 持续测量）
+  *             2) 开连续测距（通道 10，Data[2]=1）
+  *             3) 循环取数（通道 12）
+  *         本任务不关连续测量：自检模式要的是"一直有数看"，
+  *         真要"用完就关"的场合（比如推拉箱动作期间怕干扰）自己调
+  *         Tof8_ContinuousSet(slot, 0)。
+  *
+  *         上报帧（任何 CAN 分析仪/上位机都能直接读）：
+  *         ┌─ 0x7F8（距离）──────────── DLC=8 ──────────────────────┐
+  *         │ [0] 0xA6 魔数      [1] 序号（循环，在变 = 任务在跑）     │
+  *         │ [2][3] 槽0 距离 mm u16 小端   [4][5] 槽1 距离 mm u16    │
+  *         │ [6] 槽0 应答帧数低字节        [7] 槽1 应答帧数低字节    │
+  *         └──────────────────────────────────────────────────────┘
+  *         ┌─ 0x7F7（设备信息）─────── DLC=8 ──────────────────────┐
+  *         │ [0] 0xA7 魔数      [1] 槽0 设备号   [2] 槽1 设备号      │
+  *         │ [3] 槽0 分辨率(16/64)  [4] 槽1 分辨率                   │
+  *         │ [5] 槽0 频率 Hz        [6] 槽1 频率 Hz   [7] 槽数        │
+  *         └──────────────────────────────────────────────────────┘
+  *
+  *         ★ 怎么判故障（这是本模式的全部价值）：
+  *            [6][7] 一直 0          -> 请求帧根本没被应答：设备号填错 / 没接线 / 波特率不对
+  *            [2][3] = 9999(0x270F)  -> 应答正常，但模块报"无效"（无回波/贴死/超量程）
+  *            [3][5] 分辨率/频率为 0 -> 设备号不对（应答被别的设备吃了）
+  * @param  argument 未使用
+  * @retval None（死循环，永不返回）
+  */
+static void Task_Tof8(void const *argument)
+{
+	uint8_t  i;
+	uint8_t  buf[8];
+	uint8_t  seq = 0U;
+	uint8_t  diag_div = 0U;
+	uint8_t  recheck_div = 0U;
+	uint16_t d0;
+	uint16_t d1;
+	uint32_t wake;
+
+	(void)argument;
+
+	Tof8_Init();                        /* 只清内部状态，不发报文 */
+
+	/* 等模块上电稳定：连续模式首次出数可能要 >100ms，这里给 800ms 富余 */
+	osDelay(TOF8_BOOT_WAIT_MS);
+
+	/* ---- 1) 配置（开机一次即可）---- */
+	for (i = 0U; i < TOF8_DEV_NUM; i++)
+	{
+		(void)Tof8_Config(i);
+		osDelay(TOF8_CFG_GAP_MS);
+	}
+
+	/* ---- 2) 开连续测量 ---- */
+	for (i = 0U; i < TOF8_DEV_NUM; i++)
+	{
+		(void)Tof8_ContinuousSet(i, 1U);
+		osDelay(TOF8_CFG_GAP_MS);
+	}
+
+	osDelay(TOF8_FIRST_DATA_TIMEOUT_MS);
+
+	/* ---- 3) 查一次分辨率/频率：这是"设备号对不对"的唯一硬证据 ---- */
+	for (i = 0U; i < TOF8_DEV_NUM; i++)
+	{
+		(void)Tof8_RequestResolution(i);
+		osDelay(TOF8_CFG_GAP_MS);
+		(void)Tof8_RequestFrequency(i);
+		osDelay(TOF8_CFG_GAP_MS);
+	}
+
+	wake = osKernelSysTick();
+
+	for (;;)
+	{
+		/* ---- 4) 轮询每路距离（通道 12）----
+		 *      两路之间留 2ms，让第一路的应答有时间回来再发第二路，
+		 *      否则总线上请求挤在一起，拿到的可能全是「旧数据」*/
+		for (i = 0U; i < TOF8_DEV_NUM; i++)
+		{
+			(void)Tof8_RequestDistance(i);
+			osDelay(2U);
+		}
+
+		/* ---- 5) 每 100ms 上报一帧 0x7F8 ---- */
+		if (++diag_div >= (uint8_t)(TOF8_DIAG_PERIOD_MS / TOF8_POLL_PERIOD_MS))
+		{
+			diag_div = 0U;
+
+			d0 = Tof8_GetDistanceMm(0U);
+			d1 = Tof8_GetDistanceMm(1U);        /* 槽位不存在时返回 9999，正好是无效值 */
+
+			buf[0] = 0xA6U;
+			buf[1] = seq++;
+			buf[2] = (uint8_t)(d0 & 0xFFU);
+			buf[3] = (uint8_t)(d0 >> 8);
+			buf[4] = (uint8_t)(d1 & 0xFFU);
+			buf[5] = (uint8_t)(d1 >> 8);
+			buf[6] = (uint8_t)(Tof8_GetRespCount(0U) & 0xFFU);
+			buf[7] = (uint8_t)(Tof8_GetRespCount(1U) & 0xFFU);
+			(void)Can_SendStd(TOF8_DIAG_ID, buf, 8U);
+
+			/* ---- 6) 每 2s 补查一次设备号/分辨率/频率 ---- */
+			if (++recheck_div >= TOF8_RECHECK_PERIOD)
+			{
+				recheck_div = 0U;
+
+				for (i = 0U; i < TOF8_DEV_NUM; i++)
+				{
+					(void)Tof8_RequestResolution(i);
+					osDelay(TOF8_CFG_GAP_MS);
+					(void)Tof8_RequestFrequency(i);
+					osDelay(TOF8_CFG_GAP_MS);
+				}
+
+				buf[0] = 0xA7U;
+				buf[1] = Tof8_GetDev(0U);
+				buf[2] = Tof8_GetDev(1U);
+				buf[3] = Tof8_GetResolution(0U);
+				buf[4] = Tof8_GetResolution(1U);
+				buf[5] = Tof8_GetFrequency(0U);
+				buf[6] = Tof8_GetFrequency(1U);
+				buf[7] = TOF8_DEV_NUM;
+				(void)Can_SendStd(TOF8_DIAG_ID2, buf, 8U);
+			}
+		}
+
+		(void)osDelayUntil(&wake, TOF8_POLL_PERIOD_MS);
+	}
+}
+
+/**
+  * @brief  课题三·飞箱机构调试任务：扫描设备号 -> 配参数 -> 上报状态
+  *
+  *         ★ 本任务【不主动动电机】。所有运动都由上位机发 0x111 命令触发，
+  *           原因：没有极限限位挡块，自动跑序列一旦设备号映射错了，
+  *           就是让一个不知道是什么的关节自己转起来 —— 这个风险不能冒。
+  *           先人工点动确认，再谈自动化。
+  *
+  *         上电流程：
+  *             1) Fly_Init()            按 flybox.h 的宏填设备号（0xFF = 未指定）
+  *             2) Fly_VerifyAxes()      逐个设备号查状态（★ 纯读，不动电机）
+  *                                       —— 这是「5 个号是否都在」的唯一证据
+  *             3) Fly_ScanDevices()     扫全总线 0..15，看实际有哪几个号在线
+  *             4) Fly_SendScanReport()  上报扫描结果（0x7F6）
+  *             5) Fly_ConfigAxes()      0x0316(保持原号) -> 轮径 -> 使能 -> 加速度/速度
+  *                                      ★ 闸门：应答数 != 需配置轴数时一帧都不发
+  *             6) Fly_RequestPositions() 拿绝对位置基准
+  *             7) 循环：每 200ms 上报 0x7F5 状态 + 每 400ms 上报 0x7F4 位置
+  *
+  *         ★ FLY_USE_SN_BIND == 0（默认）：不做 SN 绑定，
+  *           因为设备号出厂已定（M1~M5 = 7/8/9/10/11），SN 绑定的
+  *           唯一作用就是写设备号，重复写只是多一次把号搞乱的风险。
+  *
+  *         ★ 怎么看「能不能安全地动」：
+  *             g_fly_verify_cnt == 5   5 个设备号全部在线
+  *             g_fly_cfg_cnt    == 5   5 个轴都配置成功
+  *             各轴 pos_valid   == 1   上电读到了绝对位置（软限位才可信）
+  *           对应 0x7F5 的 [7] = 0x55。
+  * @param  argument 未使用
+  * @retval None（死循环，永不返回）
+  */
+static void Task_Flybox(void const *argument)
+{
+	uint8_t  div_state = 0U;
+	uint8_t  div_pos   = 0U;
+	uint32_t wake;
+
+	(void)argument;
+
+	Fly_Init();
+
+	/* ★ 第一帧必须尽快发出去：这是「固件到底有没有在跑」的唯一证据。
+	 *   如果 CAN 上看不到 0x7F1（魔数 0xB2），就不是配置问题，
+	 *   而是固件没跑 / 烧的是旧固件 / CAN 发不出去 —— 那要先解决那个。 */
+	Fly_SetBootStage(0U);
+
+	/* ---- 0) TOF 初始化（飞箱的定位靠它，所以比电机还早一点）----
+	 * 配置帧 0x0316 + 开连续测量（通道 10），内部含约 900ms 的等待，
+	 * 正好当电机的启动等待用。
+	 * ★ TOF 一帧都读不到时后面的 TOF 闭环会直接拒绝运动（FLY_TOF_ERR_NO_DATA），
+	 *   这是故意的：没有定位手段就不该动。 */
+	Fly_SetBootStage(1U);
+	Fly_TofInit();
+
+	/* 等电机内部启动完成 */
+	Fly_SetBootStage(2U);
+	osDelay(1000U);
+
+#if (FLY_USE_SN_BIND != 0)
+	/* ---- SN 绑定（0x0313，SN 寻址）----
+	 *
+	 * ★★★ 这一步【不能省】★★★
+	 *   实测（课题二）：电机上电后不绑 SN，只会回 ACK、不转也不报位移。
+	 *   0x0313 靠 SN 匹配认领电机，绑完之后电机才认「设备号」这个地址，
+	 *   后面 0x0316 / 0x0408 / 0x0413 / 0x0416 才有意义。
+	 *
+	 *   不绑的现象就是飞箱第一次上电那样：电机不锁死、一帧都不动。
+	 *
+	 * ★ 绑定填的设备号 = FLY_DEV_*（7/8/9/10/11），
+	 *   所以这一步不改变出厂号，只是把「SN -> 设备号」确立下来。
+	 */
+	Fly_SetBootStage(3U);
+	(void)Fly_BindAxes();
+
+	/* ★ 绑定后必须等够：电机要把设备号写进内部存储（Flash），
+	 *   写完可能还会自己重启一次。等 1 秒再校验，否则会误判成「没应答」。 */
+	Fly_SetBootStage(4U);
+	osDelay(1000U);
+#endif
+
+	/* ---- 1) 校验 5 个设备号是否都在线（纯读，不动电机）----
+	 * 判据：发 0x0408 [dev, 0x25] 查状态，看有几个 dev 回了 0x0409。
+	 * ★ 这一步是后面所有运动的安全前提：只有确认 5 个号都在，
+	 *   才能确定「发 Data[4]=7 时只有 M1 会动」，而不是 5 台一起动。 */
+	Fly_SetBootStage(5U);
+	g_fly_verify_cnt = Fly_VerifyAxes(FLY_SCAN_GAP_MS);
+	Fly_SendBootStage();
+
+	/* ---- 2) 扫描 + 上报（即使校验没过，也能看到总线上到底有什么）---- */
+	Fly_SetBootStage(6U);
+	(void)Fly_ScanDevices(FLY_SCAN_GAP_MS);
+	g_fly_mapped_cnt = Fly_AutoMapDevices();
+	Fly_SendScanReport();
+
+	/* ---- 3) 配置（★ 内部有硬闸门：应答数 != 需配置轴数 时一帧 0x0316 都不发）---- */
+	Fly_SetBootStage(7U);
+	(void)Fly_ConfigAxes();
+	Fly_SendBootStage();
+
+	osDelay(500U);
+
+	/* ---- 4) 拿绝对位置基准（软限位的前提）----
+	 * ★ 两步都不能省：
+	 *     RequestPositions() 只是「发问」，RefreshPositions() 才是「收答案」。
+	 *   少了 Refresh，pos_valid 永远是 0 -> 软限位失效 + 语义动作全部拒绝执行。 */
+	Fly_SetBootStage(8U);
+	Fly_RequestPositions();
+	osDelay(300U);
+	(void)Fly_RefreshPositions();
+
+#if (FLY_JOGTEST_ON_BOOT != 0)
+	/* ---- 5) 5 轴点动自检（默认关闭，换电机/查方向时才开）---- */
+	Fly_SetBootStage(9U);
+	Fly_RunJogTest();
+	osDelay(500U);
+#endif
+
+#if (FLY_RUN_FLOW_ON_BOOT != 0)
+	/* ---- 6) ★ 上电自动开始业务流程 ----
+	 * ★ 不在这里直接跑，而是「置一个请求」交给下面的主循环。
+	 *   理由：主循环里才有循环 / 交替 / 失败停机的逻辑，
+	 *   在这里跑一遍会绕开那些逻辑（这也是之前「只跑一次就停」的原因）。
+	 *
+	 * ★ 跑之前把当前位置设为零点：
+	 *   流程用的是相对位移，本身不需要零点；
+	 *   但置零之后软限位才生效，能在出错时提前拦住。
+	 *   ★ 前提：上电时机构处于「你觉得的基准姿态」，否则软限位会按错的基准算。
+	 *     现在 FLY_*_MIN/MAX 给的都是宽范围，所以即使基准偏一些也不会误拦。 */
+	Fly_SetBootStage(9U);
+	Fly_SetZeroAll();
+	osDelay(200U);
+
+#if (FLY_BOOT_FLOW == FLY_FLOW_PULL) || (FLY_BOOT_FLOW == FLY_FLOW_PUSH)
+	g_fly_flow_which = FLY_BOOT_FLOW;
+	g_fly_flow_req   = 1U;
+#else
+#error "FLY_BOOT_FLOW 必须是 FLY_FLOW_PULL 或 FLY_FLOW_PUSH"
+#endif
+
+	osDelay(100U);
+#endif
+
+	Fly_SetBootStage(10U);
+
+	wake = osKernelSysTick();
+
+	for (;;)
+	{
+		/* ---- 业务流程请求（0x111 [0x0D, 1=拉箱 / 2=推箱]）----
+		 * ★ 必须在任务里执行：流程内部每步都要等到位。 */
+		if ((g_fly_flow_req != 0U) && (g_fly_flow_running == 0U))
+		{
+			g_fly_flow_req = 0U;
+
+			do
+			{
+				uint8_t fail;
+
+				if (g_fly_flow_which == FLY_FLOW_PULL)
+				{
+					fail = Fly_RunPullOnce();
+				}
+				else
+				{
+					fail = Fly_RunPushOnce();
+				}
+
+				/* ★ 任何一步失败就整轮停下。
+				 *   后面没有限位挡块，失败后继续跑下一轮 = 闭着眼睛往结构上撞。 */
+				if (fail != 0U) { break; }
+
+#if (FLY_FLOW_LOOP == 0)
+				break;                  /* 不循环：跑一轮就回待机 */
+#else
+	#if (FLY_FLOW_LOOP_ALT != 0)
+				/* 拉箱 / 推箱 交替：拉完接着推，推完再拉 */
+				g_fly_flow_which = (g_fly_flow_which == FLY_FLOW_PULL)
+				                 ? FLY_FLOW_PUSH
+				                 : FLY_FLOW_PULL;
+	#endif
+				osDelay(FLY_FLOW_STEP_GAP_MS);
+#endif
+			} while (g_fly_flow_req == 0U);
+
+			osDelay(200U);
+		}
+
+		/* ---- 置零请求（0x111 [0x0A, 轴号]）----
+		 * ★ 前提：人已经把机构摆到该轴的零点姿态。
+		 *   置零只是「把当前位置记为 0」，不会让机构动。 */
+		if (g_fly_zero_req != 0U)
+		{
+			g_fly_zero_req = 0U;
+
+			if (g_fly_zero_axis == 0xFFU)
+			{
+				Fly_SetZeroAll();
+			}
+			else if (g_fly_zero_axis < FLY_AXIS_COUNT)
+			{
+				(void)Fly_SetZeroAxis((FlyAxis_t)g_fly_zero_axis);
+			}
+			g_fly_zero_axis = 0xFFU;
+		}
+
+		/* ---- 上位机发 0x111 [0x09] 可随时重跑点动自检 ----
+		 * ★ 必须在任务里执行，不能在 Task_CanRx 里：
+		 *   点动要等到位（内部 osDelay 几百毫秒），
+		 *   在接收任务里跑会把整个 CAN 接收链路堵住。 */
+		if (g_fly_jogtest_req != 0U)
+		{
+			g_fly_jogtest_req = 0U;
+			Fly_RunJogTest();
+			osDelay(500U);
+		}
+
+		/* 每 200ms：5 轴设备号 + 校验/配置状态 */
+		if (++div_state >= 4U)
+		{
+			div_state = 0U;
+			Fly_SendStateReport();
+
+			/* 同频上报两路 TOF 距离（mm）+ 最近一次闭环结果，
+			 * 让你在 CAN 分析仪上直接看到「距离在变」。 */
+			Fly_SendTofReport();
+		}
+
+		/* ---- 皮带同步点动（0x111 [0x0C, 方向, 距离L, 距离H]）----
+		 * ★ 验证「两条皮带能不能一起动」。和逐轴点动不同，
+		 *   这里两帧位置指令紧挨着发，中间不留延时。 */
+		if (g_fly_beltjog_req != 0U)
+		{
+			g_fly_beltjog_req = 0U;
+			(void)Fly_BeltBothJog((int32_t)(int16_t)g_fly_beltjog_mm * 10);
+			osDelay(300U);
+		}
+
+		/* ---- TOF 联动诊断（0x111 [0x0B, 轴, 步长L, 步长H, 步数]）----
+		 * 让某个轴慢走几步，每步报一次两路 TOF，用来确定
+		 * 「哪个传感器在测哪个轴的运动方向」。
+		 * ★ 必须在任务里跑：内部要等到位。 */
+		if (g_fly_tofprobe_req != 0U)
+		{
+			g_fly_tofprobe_req = 0U;
+			(void)Fly_TofProbe(g_fly_tofprobe_belt,
+			                   g_fly_tofprobe_step,
+			                   g_fly_tofprobe_cnt);
+			osDelay(300U);
+		}
+
+		/* 每 400ms：轮流上报一个轴的位置 / 剩余位移 / 反馈帧数 */
+		if (++div_pos >= 8U)
+		{
+			div_pos = 0U;
+			Fly_SendPosReport();
+		}
+
+		(void)osDelayUntil(&wake, 50U);
+	}
+}
+
+/**
   * @brief  CAN 收到帧入队后的通知（在中断里调用，只做唤醒任务）
   */
 static void OnCanRx(void)
@@ -519,6 +968,17 @@ osThreadDef(Task_CanHeartbeat, Task_CanHeartbeat, osPriorityAboveNormal, 0, 256)
 /* ★ Task_Bringup 提到 AboveNormal：脱机主控一旦被饿死，车就完全不动，
  *   必须保证它拿到 CPU 把初始化帧和运动帧发出去 */
 osThreadDef(Task_Bringup, Task_Bringup, osPriorityAboveNormal, 0, 320);
+/* 课题三·TOF8 测距：Normal 优先级即可，它只是每 10ms 发一帧请求 */
+osThreadDef(Task_Tof8, Task_Tof8, osPriorityNormal, 0, 320);
+/* 课题三·飞箱：AboveNormal —— 它要在等待到位的循环里保持节奇准，
+ * 且一旦被饿死，运动中的轴就没人确认到位了。
+ * ★ 栈从 384 提到 512 字（2KB）：这条线程的调用链最深
+ *   （Fly_RunJogTest -> Fly_MoveRelEx -> Fly_SendFrame -> Can_SendStd
+ *     -> HAL_CAN_AddTxMessage 里有 CAN_TxHeaderTypeDef 等局部变量），
+ *   再加上 Fly_TofInit 那一路，1.5KB 附近有溢出风险。
+ *   栈溢出在 FreeRTOS 里表现为 HardFault 或莫名卡死，
+ *   现象就是「上电什么都不动、灯也不闪」—— 和最开始的症状一样。 */
+osThreadDef(Task_Flybox, Task_Flybox, osPriorityAboveNormal, 0, 512);
 
 /* Exported functions --------------------------------------------------------*/
 
@@ -564,6 +1024,22 @@ int main(void)
 	Angle_Init();                       /* 必须在 XV7001bb_Init 之后：先读一次状态/温度 */
 	Motor_Init();                       /* 只为让 Motor_OnFrame 能解析反馈（本模式不发初始化序列）*/
 	Can_SetRxCallback(OnCanRx);         /* 收到帧后唤醒 Task_CanRx */
+#elif (CURRENT_TEST_MODE == TEST_MODE_TOF8)
+	/* 课题三·TOF8 测距自检：只开 CAN，不碰陀螺仪、不碰电机。
+	 * ★ 为什么刻意不初始化电机：本模式要回答的问题是
+	 *   「TOF8 到底能不能测到距离」，这跟电机、陀螺仪一点关系都没有。
+	 *   一旦同时跑，电机反馈帧会淹没 0x7F8 的排查视野。 */
+	Can_Init();                         /* CAN1 1Mbps + 接收中断 */
+	Can_SetRxCallback(OnCanRx);         /* 收到帧后唤醒 Task_CanRx */
+#elif (CURRENT_TEST_MODE == TEST_MODE_FLYBOX)
+	/* 课题三·飞箱机构调试：只开 CAN。
+	 * ★ 不初始化陀螺仪、不初始化 TOF8 —— 本阶段只解决「5 台电机是什么号」
+	 *   和「每个轴能不能安全地点动」，多开一路就多一份排查干扰。
+	 * ★ Motor_Init() 必须调：Motor_OnFrame() 靠它清缓存 + 填配置表，
+	 *   而 0x0420 剩余位移（到位判据的唯一来源）就在里面解析。 */
+	Can_Init();
+	Motor_Init();
+	Can_SetRxCallback(OnCanRx);
 #endif
 
 	/* 3.5 LED 心跳指示灯：这里只做 GPIO 初始化，
@@ -611,6 +1087,20 @@ int main(void)
 	TaskHeartbeatHandle = osThreadCreate(osThread(Task_CanHeartbeat), NULL); /* 0x7FE 心跳（也可当"固件没抢电机"的证据）*/
 	TaskAngleHandle = osThreadCreate(osThread(Task_Angle),   NULL);   /* 陀螺仪：1ms 采样 / 10ms 输出 */
 	TaskCanTxHandle = osThreadCreate(osThread(Task_CanTx),   NULL);   /* 发 0x101/0x102 给上位机 */
+#elif (CURRENT_TEST_MODE == TEST_MODE_TOF8)
+	/* ---- 课题三·TOF8 测距自检：只跑这一条链路 ---- */
+	TaskLedHandle   = osThreadCreate(osThread(Task_Led),     NULL);   /* 心跳灯：灯闪 = 固件在跑 */
+	TaskCanRxHandle = osThreadCreate(osThread(Task_CanRx),   NULL);   /* 解析 0x0409/0x0793/0x0794 */
+	TaskTof8Handle  = osThreadCreate(osThread(Task_Tof8),    NULL);   /* 配置 + 轮询 + 0x7F8 上报 */
+#elif (CURRENT_TEST_MODE == TEST_MODE_FLYBOX)
+	/* ---- 课题三·飞箱机构调试 ---- */
+	TaskLedHandle   = osThreadCreate(osThread(Task_Led),     NULL);   /* 心跳灯 */
+	TaskCanRxHandle = osThreadCreate(osThread(Task_CanRx),   NULL);   /* 0x111 命令 + 电机反馈 */
+	TaskFlyboxHandle = osThreadCreate(osThread(Task_Flybox), NULL);   /* 扫描 + 配置 + 上报 */
+	/* ★ 独立心跳（0x7FE，500ms）：
+	 *   它和 flybox 模块完全无关，只证明「STM32 在跑并且能发 CAN」。
+	 *   如果连 0x7FE 都看不到，问题就不在飞箱逻辑里，而在固件/收发器/接线。 */
+	TaskHeartbeatHandle = osThreadCreate(osThread(Task_CanHeartbeat), NULL);
 #endif
 
 	/* 5. 启动 FreeRTOS 调度器：任务从此刻开始运行。

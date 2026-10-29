@@ -419,7 +419,32 @@ void Motor_OnFrame(const CanFrame_t *frame)
 	if (id == CAN_ID_MOTOR_QUERY_RESP)
 	{
 		if (frame->dlc < 2U) { return; }
+
+		/* ★★ 先按 Data[0] 原值挡一层 ★★
+		 *
+		 *   下面用 `data[0] & 0x0F` 取索引，是为了兼容「设备号写在低 4 位」的
+		 *   老写法。但这个截断会让高位信息丢失，把无关设备混进来：
+		 *
+		 *     TOF8 的设备号是 25 / 26 -> & 0x0F 后变成 9 / 10，
+		 *     正好等于飞箱的「M3 滑台(9)」「M4 旋转(10)」！
+		 *
+		 *   一旦某条 TOF 应答没被 Tof8_OnFrame() 认领（比如设备号不在
+		 *   TOF8_DEV0/DEV1 里，或者 flybox 没开 TOF），它就会掉到这里，
+		 *   被当成「M3/M4 的位置应答」写进缓存 —— 位置数据直接被污染，
+		 *   TOF 闭环会基于错误的距离做判断。
+		 *
+		 *   所以：设备号 > 15 的 0x0409 一律视为「不是电机」，直接丢弃。
+		 *   电机设备号实测都在 0..15 内（小车 0/1，飞箱 7~11）。 */
+		if (frame->data[0] > 0x0FU) { return; }
+
 		dev = (uint8_t)(frame->data[0] & 0x0FU);
+
+		/* ★ 记一次「这个设备号应答过」。
+		 *   0x0420/0x0380 也会累加这个计数，但那些是电机【主动】上报，
+		 *   而查询应答是被动回包 —— 后者对「扫描设备号」更直接：
+		 *   刚上电、还没写 0x0316 时，电机可能一条 0x0420 都不发，
+		 *   但它一定会回应 0x0408 查询，所以有这个计数才能可靠地发现设备。 */
+		s_fb_count[dev]++;
 
 		switch (frame->data[1])
 		{
@@ -657,6 +682,103 @@ int32_t Motor_GetQueryPos(uint8_t idx)
 {
 	if (idx >= MOTOR_COUNT) { return 0; }
 	return s_query_pos[(uint8_t)(s_cfg[idx].dev & 0x0FU)];
+}
+
+/* ------------------------------------------------------------------
+ *   课题三·飞箱：按物理设备号直接访问
+ *   ★ 这些接口绕开 s_cfg[] 配置表，因为飞箱的 5 台电机设备号是出厂固定的，
+ *     固件不能（也不应该）把它们登记成「左轮/右轮」。
+ * ------------------------------------------------------------------ */
+
+uint8_t Motor_SendQueryDev(uint8_t dev, uint8_t query_type)
+{
+	uint8_t d[2];
+
+	if (dev > 0x0FU) { return 1U; }
+
+	d[0] = (uint8_t)(dev & 0x0FU);
+	d[1] = query_type;
+	return Can_SendStd(CAN_ID_MOTOR_QUERY, d, 2U);
+}
+
+uint8_t Motor_SendBindSn(const uint8_t *sn7, uint8_t dev)
+{
+	uint8_t d[8];
+	uint8_t i;
+
+	if ((sn7 == NULL) || (dev > 0x0FU)) { return 1U; }
+
+	for (i = 0U; i < 7U; i++)
+	{
+		d[i] = sn7[i];
+	}
+	d[7] = (uint8_t)(dev & 0x0FU);
+
+	return Can_SendStd(CAN_ID_MOTOR_BIND_SN, d, 8U);
+}
+
+uint8_t Motor_SendParamDev(uint8_t dev, uint8_t motor_no)
+{
+	uint8_t d[8];
+
+	if (dev > 0x0FU) { return 1U; }
+
+	d[0] = (uint8_t)(((uint8_t)CAR_MOTOR_BYTE0_HI << 4) | (uint8_t)CAR_MOTOR_POLE_PAIRS);
+	d[1] = (uint8_t)(((uint8_t)CAR_MOTOR_SPEED_P << 4) | (uint8_t)CAR_MOTOR_SPEED_I);
+	d[2] = (uint8_t)(((uint8_t)CAR_MOTOR_TORQUE_P << 4) | (uint8_t)CAR_MOTOR_TORQUE_I);
+	d[3] = (uint8_t)(((uint8_t)CAR_MOTOR_CURRENT_CW << 4) | (uint8_t)CAR_MOTOR_CURRENT_CCW);
+	d[4] = (uint8_t)((((uint8_t)CAR_MOTOR_BRAKE != 0U) ? 0x02U : 0x00U) |
+	                 (((uint8_t)CAR_MOTOR_DAMPING != 0U) ? 0x01U : 0x00U));
+	d[5] = (uint8_t)(((uint8_t)CAR_MOTOR_SPEED_D << 4) | (uint8_t)CAR_MOTOR_TORQUE_D);
+	d[6] = (uint8_t)((((uint8_t)CAR_MOTOR_AUTO_UNLOCK != 0U) ? 0x40U : 0x00U) |
+	                 (((uint8_t)CAR_MOTOR_RETURN_REMAIN != 0U) ? 0x00U : 0x20U) |
+	                 (((uint8_t)CAR_MOTOR_RETURN_TORQUE != 0U) ? 0x00U : 0x10U) |
+	                 (uint8_t)(motor_no & 0x0FU));
+	d[7] = (uint8_t)(dev & 0x0FU);
+
+	return Can_SendStd(CAN_ID_MOTOR_CFG_PARAM, d, 8U);
+}
+
+uint8_t Motor_HasRemainDev(uint8_t dev)
+{
+	if (dev > 0x0FU) { return 0U; }
+	return s_has_remain[dev];
+}
+
+int32_t Motor_GetRemainDev(uint8_t dev)
+{
+	if (dev > 0x0FU) { return 0; }
+	/* ★ 默认用主帧组的通道（飞箱电机都按主帧组配置）；
+	 *   若某台实际走从帧组，需要在这里扩展成可配置项。 */
+	return s_remain_main[dev];
+}
+
+uint8_t Motor_HasQueryPosDev(uint8_t dev)
+{
+	if (dev > 0x0FU) { return 0U; }
+	return s_has_query_pos[dev];
+}
+
+int32_t Motor_GetQueryPosDev(uint8_t dev)
+{
+	if (dev > 0x0FU) { return 0; }
+	return s_query_pos[dev];
+}
+
+uint32_t Motor_GetFbCountDev(uint8_t dev)
+{
+	if (dev > 0x0FU) { return 0U; }
+	return s_fb_count[dev];
+}
+
+void Motor_ClearFbCount(void)
+{
+	uint8_t i;
+
+	for (i = 0U; i < MOTOR_DEV_SLOTS; i++)
+	{
+		s_fb_count[i] = 0U;
+	}
 }
 
 uint32_t Motor_GetFeedbackSeq(uint8_t idx)

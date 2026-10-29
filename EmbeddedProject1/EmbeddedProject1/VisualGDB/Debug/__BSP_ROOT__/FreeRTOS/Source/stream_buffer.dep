@@ -23,7 +23,7 @@ VisualGDB/Debug/__BSP_ROOT__/FreeRTOS/Source/stream_buffer.o: \
  C:/SysGCC/arm-eabi/arm-none-eabi/include/strings.h \
  C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/string.h \
  C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/FreeRTOS.h \
- D:/AGV_Car_Project2/EmbeddedProject1/EmbeddedProject1/FreeRTOSConfig.h \
+ D:/FLY_BOX_Project3/EmbeddedProject1/EmbeddedProject1/FreeRTOSConfig.h \
  C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/projdefs.h \
  C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/portable.h \
  C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/deprecated_definitions.h \
@@ -55,7 +55,7 @@ C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/_locale.h:
 C:/SysGCC/arm-eabi/arm-none-eabi/include/strings.h:
 C:/SysGCC/arm-eabi/arm-none-eabi/include/sys/string.h:
 C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/FreeRTOS.h:
-D:/AGV_Car_Project2/EmbeddedProject1/EmbeddedProject1/FreeRTOSConfig.h:
+D:/FLY_BOX_Project3/EmbeddedProject1/EmbeddedProject1/FreeRTOSConfig.h:
 C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/projdefs.h:
 C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/portable.h:
 C:/Users/WangHuaYu/AppData/Local/VisualGDB/EmbeddedBSPs/arm-eabi/com.sysprogs.arm.stm32/FreeRTOS/Source/Include/deprecated_definitions.h:
