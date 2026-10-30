@@ -151,6 +151,7 @@ volatile uint8_t  g_fly_learn_req    = 0U;
 volatile uint8_t  g_fly_tofhealth_req = 0U;
 volatile uint8_t  g_fly_tofscan_req   = 0U;
 volatile uint8_t  g_fly_hookhome_req  = 0U;
+volatile uint8_t  g_fly_frame_detect_cnt = 0U;
 
 /* ★ 拉箱前伸距离（mm）—— 现场可调，不靠重编烧录 */
 volatile uint16_t g_fly_pull_fwd_mm  = (uint16_t)FLY_PULL_SLIDE_FWD_MM;
@@ -877,6 +878,124 @@ uint8_t Fly_ConfigAxes(void)
 	return n;
 }
 
+/* =========================================================================
+ *      ★★★ 主帧组 / 从帧组 自动探测（2026-10-30 新增）★★★
+ *
+ *  ★ 要解决的问题：
+ *    双通道驱动器上挂在第二路的电机，只响应从帧组 0x0417/18/19，
+ *    收不到主帧组 0x0414/15/16。
+ *    表现：这台电机「能锁死、按设备号能查询、但一发运动指令就一动不动」。
+ *
+ *    现场现象：两条皮带一起动时只有左边的动，右边纹丝不动。
+ *    根因就是 Fly_BeltMove() 之前固定发主帧组（已修）。
+ *
+ *  ★ 为什么探测是【零风险】的：
+ *    发错帧组的那条指令，总线上没有任何电机会接收 ——
+ *    所以「先试主组、再试从组」不会造成双重运动或撞结构。
+ *    而且探测位移只有 0.4mm，肉眼看不出来。
+ *
+ *  ★ 判据：发一条位置指令后，看 0x0420 里哪个通道的剩余位移变成非 0。
+ *        主通道非 0 -> 这个轴在主帧组
+ *        从通道非 0 -> 这个轴在从帧组
+ *        都是 0     -> 这个轴没应答（设备号错 / 没使能 / 没接）
+ * ========================================================================= */
+
+/* 探测一次某个帧组：返回 1 = 该组有响应 */
+static uint8_t Fly_ProbeGroup(FlyAxis_t axis, uint8_t slave)
+{
+	FlyAxisState_t *a = &s_ax[axis];
+	int32_t m0;
+	int32_t s0;
+	int32_t probe = 40;                 /* 40 单位 = 0.4mm，肉眼不可见 */
+	uint8_t i;
+
+	if (a->dev == FLY_DEV_UNKNOWN) { return 0U; }
+
+	m0 = Motor_GetRemainMainDev(a->dev);
+	s0 = Motor_GetRemainSlaveDev(a->dev);
+
+	/* 加速度 -> 速度 -> 位置，顺序不能反 */
+	if (slave != 0U)
+	{
+		(void)Fly_SendAccelSlave(a->motor_no, Fly_AxisAccel(axis));
+		osDelay(FLY_MOTION_GAP_MS);
+		(void)Fly_SendSpeedSlave(a->motor_no, 2000U);
+		osDelay(FLY_MOTION_GAP_MS);
+		(void)Fly_SendPosRelSlave(a->motor_no, probe);
+	}
+	else
+	{
+		(void)Fly_SendAccel(a->motor_no, Fly_AxisAccel(axis));
+		osDelay(FLY_MOTION_GAP_MS);
+		(void)Fly_SendSpeed(a->motor_no, 2000U);
+		osDelay(FLY_MOTION_GAP_MS);
+		(void)Fly_SendPosRel(a->motor_no, probe);
+	}
+
+	/* ★ 等 200ms：足够让 0x0420 回来（电机回传周期通常 < 50ms），
+	 *   又远小于「0.4mm 走完」的时间，所以不会跑远。 */
+	for (i = 0U; i < 10U; i++)
+	{
+		osDelay(20U);
+
+		if ((Motor_GetRemainMainDev(a->dev) != m0) ||
+		    (Motor_GetRemainSlaveDev(a->dev) != s0))
+		{
+			return 1U;                  /* 有变化 = 这一组有电机在听 */
+		}
+	}
+
+	return 0U;
+}
+
+uint8_t Fly_DetectFrameGroups(void)
+{
+	uint8_t i;
+	uint8_t found = 0U;
+
+	for (i = 0U; i < FLY_AXIS_COUNT; i++)
+	{
+		FlyAxis_t ax = (FlyAxis_t)i;
+
+		if (s_ax[i].dev == FLY_DEV_UNKNOWN) { continue; }
+
+		/* ---- 先试主帧组（绝大多数情况）---- */
+		s_ax[i].use_slave = 0U;
+
+		if (Fly_ProbeGroup(ax, 0U) != 0U)
+		{
+			found++;
+			continue;
+		}
+
+		/* ---- 主组没反应 -> 试从帧组 ---- */
+		if (Fly_ProbeGroup(ax, 1U) != 0U)
+		{
+			s_ax[i].use_slave = 1U;
+			g_fly_slave_used_mask |= (uint8_t)(1U << i);
+			found++;
+			continue;
+		}
+
+		/* 两组都没反应：保持主组（后面会按失败处理） */
+		s_ax[i].use_slave = 0U;
+	}
+
+	g_fly_frame_detect_cnt = found;
+	return found;
+}
+
+/** @brief 手动指定某轴用主/从帧组（0x111 [0x13, 轴号, 0=主/1=从]）*/
+void Fly_SetFrameGroup(uint8_t axis, uint8_t slave)
+{
+	if (axis >= FLY_AXIS_COUNT) { return; }
+
+	s_ax[axis].use_slave = (slave != 0U) ? 1U : 0U;
+
+	if (slave != 0U) { g_fly_slave_used_mask |= (uint8_t)(1U << axis); }
+	else             { g_fly_slave_used_mask &= (uint8_t)~(1U << axis); }
+}
+
 void Fly_RequestPositions(void)
 {
 	uint8_t i;
@@ -1147,15 +1266,33 @@ uint8_t Fly_BeltMove(int32_t dist_units, uint32_t speed, uint32_t accel)
 	limit = (int32_t)FLY_JOG_MAX_MM * (int32_t)FLY_UNITS_PER_MM;
 	if ((dist_units > limit) || (dist_units < -limit)) { return 1U; }
 
-	/* 加速度、速度各发一帧，帧间留间隔 */
-	(void)Fly_SendAccel(l->motor_no, accel);
-	osDelay(FLY_MOTION_GAP_MS);
-	(void)Fly_SendAccel(r->motor_no, accel);
+	/* ★★★ 2026-10-30 修掉一个真 bug：这里原来【完全不看 use_slave】★★★
+	 *
+	 *   原来固定发主帧组 0x0414/15/16。
+	 *   如果 M2 挂在双通道驱动器的第二路（只收 0x0417/18/19），
+	 *   它一帧都收不到 -> 表现就是「只有左边的皮带动，右边纹丝不动」。
+	 *
+	 *   这和 Fly_MoveRelEx() 的写法本来就不一致（那边是按 use_slave 选的），
+	 *   所以同一个轴单独动可能正常、两条皮带一起动就有问题。
+	 *
+	 *   现在两条皮带各自按自己的 use_slave 选通道。 */
+
+	/* ---- 加速度（每台各自通道）---- */
+	if (l->use_slave != 0U) { (void)Fly_SendAccelSlave(l->motor_no, accel); }
+	else                    { (void)Fly_SendAccel(l->motor_no, accel); }
 	osDelay(FLY_MOTION_GAP_MS);
 
-	(void)Fly_SendSpeed(l->motor_no, speed);
+	if (r->use_slave != 0U) { (void)Fly_SendAccelSlave(r->motor_no, accel); }
+	else                    { (void)Fly_SendAccel(r->motor_no, accel); }
 	osDelay(FLY_MOTION_GAP_MS);
-	(void)Fly_SendSpeed(r->motor_no, speed);
+
+	/* ---- 速度 ---- */
+	if (l->use_slave != 0U) { (void)Fly_SendSpeedSlave(l->motor_no, speed); }
+	else                    { (void)Fly_SendSpeed(l->motor_no, speed); }
+	osDelay(FLY_MOTION_GAP_MS);
+
+	if (r->use_slave != 0U) { (void)Fly_SendSpeedSlave(r->motor_no, speed); }
+	else                    { (void)Fly_SendSpeed(r->motor_no, speed); }
 	osDelay(FLY_MOTION_GAP_MS);
 
 	{
@@ -1173,8 +1310,20 @@ uint8_t Fly_BeltMove(int32_t dist_units, uint32_t speed, uint32_t accel)
 	 * ★ 方向符号在这里【分别】应用：
 	 *   M1 正装、M2 反装，同一条「向前 1000」在 CAN 上必须是 +1000 和 -1000。
 	 *   这正是课题二左右轮的处理方式（left * sign[0], right * sign[1]）。 */
-	if (Fly_SendPosRel(l->motor_no, dist_units * (int32_t)FLY_DIR_SIGN_BELT_L) != 0U) { return 1U; }
-	if (Fly_SendPosRel(r->motor_no, dist_units * (int32_t)FLY_DIR_SIGN_BELT_R) != 0U) { return 1U; }
+	{
+		int32_t dl = dist_units * (int32_t)FLY_DIR_SIGN_BELT_L;
+		int32_t dr = dist_units * (int32_t)FLY_DIR_SIGN_BELT_R;
+		uint8_t f1;
+		uint8_t f2;
+
+		if (l->use_slave != 0U) { f1 = Fly_SendPosRelSlave(l->motor_no, dl); }
+		else                    { f1 = Fly_SendPosRel(l->motor_no, dl); }
+
+		if (r->use_slave != 0U) { f2 = Fly_SendPosRelSlave(r->motor_no, dr); }
+		else                    { f2 = Fly_SendPosRel(r->motor_no, dr); }
+
+		if ((f1 != 0U) || (f2 != 0U)) { return 1U; }
+	}
 
 	if (l->pos_valid != 0U) { l->pos += dist_units; }
 	if (r->pos_valid != 0U) { r->pos += dist_units; }
@@ -1190,7 +1339,11 @@ static uint8_t Fly_WaitOne(FlyAxisState_t *a, uint32_t timeout_ms)
 
 	while (waited < timeout_ms)
 	{
-		int32_t rem  = Motor_GetRemainDev(a->dev);
+		/* ★ 按该轴自己的帧组读剩余位移。
+		 *   Motor_GetRemainDev() 只返回主通道值 —— 挂在从帧组的轴
+		 *   主通道永远是 0，用它判断就会永远以为「已经到位」。 */
+		int32_t rem = (a->use_slave != 0U) ? Motor_GetRemainSlaveDev(a->dev)
+		                                   : Motor_GetRemainMainDev(a->dev);
 		int32_t arem = (rem >= 0) ? rem : -rem;
 
 		if (arem > (int32_t)FLY_REMAIN_EPS_UNITS)
@@ -1219,7 +1372,8 @@ static uint8_t Fly_WaitOne(FlyAxisState_t *a, uint32_t timeout_ms)
 
 	/* 停稳后再确认一次 */
 	{
-		int32_t rem  = Motor_GetRemainDev(a->dev);
+		int32_t rem = (a->use_slave != 0U) ? Motor_GetRemainSlaveDev(a->dev)
+		                                   : Motor_GetRemainMainDev(a->dev);
 		int32_t arem = (rem >= 0) ? rem : -rem;
 
 		if (arem > (int32_t)FLY_REMAIN_EPS_UNITS) { ok = 0U; }
@@ -2316,6 +2470,15 @@ void Fly_OnCommand(const uint8_t *data, uint8_t dlc)
 		/* ★ M5 抓钩归零：只置请求，由 Task_Flybox 执行（要等到位）。
 		 *   用途：流程中途停掉后抓钩停在抬起位置，手动把它转回垂下。 */
 		if (g_fly_flow_running == 0U) { g_fly_hookhome_req = 1U; }
+		break;
+
+	case FLY_CMD_FRAME_GROUP:
+		/* ★ 手动指定帧组：[1] 轴号 [2] 0=主帧组 / 1=从帧组
+		 *   自动探测失手时的遗手。★ 只改帧组，不运动，不需要避开流程。 */
+		if ((dlc >= 3U) && (data[1] < FLY_AXIS_COUNT))
+		{
+			Fly_SetFrameGroup(data[1], (data[2] != 0U) ? 1U : 0U);
+		}
 		break;
 
 	case FLY_CMD_GRAB_DIST:

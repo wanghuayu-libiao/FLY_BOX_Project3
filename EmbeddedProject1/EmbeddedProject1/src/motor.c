@@ -748,9 +748,23 @@ uint8_t Motor_HasRemainDev(uint8_t dev)
 int32_t Motor_GetRemainDev(uint8_t dev)
 {
 	if (dev > 0x0FU) { return 0; }
-	/* ★ 默认用主帧组的通道（飞箱电机都按主帧组配置）；
-	 *   若某台实际走从帧组，需要在这里扩展成可配置项。 */
+	/* ★ 默认返回主帧组通道。
+	 *   ★★ 注意：如果某台电机实际挂在从帧组，这里会读到永远为 0 的主通道值。
+	 *      飞箱用 Motor_GetRemainMainDev / Motor_GetRemainSlaveDev 配合
+	 *      s_ax[].use_slave 自己选，不用这个函数。 */
 	return s_remain_main[dev];
+}
+
+int32_t Motor_GetRemainMainDev(uint8_t dev)
+{
+	if (dev > 0x0FU) { return 0; }
+	return s_remain_main[dev];
+}
+
+int32_t Motor_GetRemainSlaveDev(uint8_t dev)
+{
+	if (dev > 0x0FU) { return 0; }
+	return s_remain_slave[dev];
 }
 
 uint8_t Motor_HasQueryPosDev(uint8_t dev)

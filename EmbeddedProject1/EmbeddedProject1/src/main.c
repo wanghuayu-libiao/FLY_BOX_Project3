@@ -795,9 +795,25 @@ static void Task_Flybox(void const *argument)
 	osDelay(300U);
 	(void)Fly_RefreshPositions();
 
+	/* ---- 4.5) ★ 探测每个轴挂在主帧组还是从帧组 ----
+	 *
+	 *  ★ 不探测的后果（现场已踩到）：
+	 *    双通道驱动器上挂在第二路的电机只收从帧组 0x0417/18/19，
+	 *    收不到主帧组的电机「能锁死、能查询，但一发运动就一动不动」。
+	 *    表现就是「两条皮带只有左边动」。
+	 *
+	 *  ★ 探测是零风险的：发错帧组的指令没有电机接收，且位移只有 0.4mm。
+	 *  ★ 必须在 0x0316 + 0x0413 使能之后做（否则电机不回应）。 */
+#if (FLY_FRAME_DETECT_ON_BOOT != 0)
+	Fly_SetBootStage(9U);
+	(void)Fly_DetectFrameGroups();
+	Fly_SendBootStage();
+	osDelay(200U);
+#endif
+
 #if (FLY_JOGTEST_ON_BOOT != 0)
 	/* ---- 5) 5 轴点动自检（默认关闭，换电机/查方向时才开）---- */
-	Fly_SetBootStage(9U);
+	Fly_SetBootStage(10U);
 	Fly_RunJogTest();
 	osDelay(500U);
 #endif
@@ -816,7 +832,7 @@ static void Task_Flybox(void const *argument)
 	 *
 	 *   所以先反向转回垂下位置，再置零。
 	 *   由 FLY_HOOK_BOOT_HOME 控制（1 = 做）。 */
-	Fly_SetBootStage(9U);
+	Fly_SetBootStage(11U);
 
 #if (FLY_HOOK_BOOT_HOME != 0)
 	(void)Fly_HookHomeNow();
@@ -840,7 +856,13 @@ static void Task_Flybox(void const *argument)
 	osDelay(100U);
 #endif
 
-	Fly_SetBootStage(10U);
+	/* ★ 阶段号对照（看 0x7E0 的 stage 字节就能判断卡在哪）：
+	 *     0..8  : 初始化 / 扫描 / 校验 / 配置 / 读位置
+	 *     9     : 主帧组 / 从帧组 自动探测
+	 *     10    : 5 轴点动自检（默认关闭）
+	 *     11    : M5 抓钩归零 + 全部置零
+	 *     12    : 就绪，进入主循环 */
+	Fly_SetBootStage(12U);
 
 	wake = osKernelSysTick();
 
