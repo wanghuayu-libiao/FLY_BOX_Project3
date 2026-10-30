@@ -806,14 +806,27 @@ static void Task_Flybox(void const *argument)
 	/* ---- 6) ★ 上电自动开始业务流程 ----
 	 * ★ 不在这里直接跑，而是「置一个请求」交给下面的主循环。
 	 *   理由：主循环里才有循环 / 交替 / 失败停机的逻辑，
-	 *   在这里跑一遍会绕开那些逻辑（这也是之前「只跑一次就停」的原因）。
+	 *   在这里跑一遍会绕开那些逻辑。
 	 *
-	 * ★ 跑之前把当前位置设为零点：
+	 * ★★★ M5 归零必须在 SetZeroAll 【之前】★★★
+	 *
+	 *   SetZeroAll 把「当前姿态」当成 0°。如果上次流程中途停了、
+	 *   抓钩还开着（比如 90°），那 90° 就被当成了 0°，
+	 *   接下来「抬钩 100°」就变成从 90° 再抬 100° = 190° -> 顶结构。
+	 *
+	 *   所以先反向转回垂下位置，再置零。
+	 *   由 FLY_HOOK_BOOT_HOME 控制（1 = 做）。 */
+	Fly_SetBootStage(9U);
+
+#if (FLY_HOOK_BOOT_HOME != 0)
+	(void)Fly_HookHomeNow();
+	osDelay(200U);
+#endif
+
+	/* ★ 现在把当前位置设为零点。
 	 *   流程用的是相对位移，本身不需要零点；
 	 *   但置零之后软限位才生效，能在出错时提前拦住。
-	 *   ★ 前提：上电时机构处于「你觉得的基准姿态」，否则软限位会按错的基准算。
-	 *     现在 FLY_*_MIN/MAX 给的都是宽范围，所以即使基准偏一些也不会误拦。 */
-	Fly_SetBootStage(9U);
+	 *   ★ 前提：上电时机构处于「你觉得的基准姿态」。 */
 	Fly_SetZeroAll();
 	osDelay(200U);
 
@@ -924,6 +937,16 @@ static void Task_Flybox(void const *argument)
 			g_fly_tofscan_req = 0U;
 			(void)Tof8_ScanDevices(20U);
 			Fly_SendTofScanReport();
+		}
+
+		/* ---- M5 抓钩归零（0x111 [0x12]）----
+		 * ★ 流程中途停掉后抓钩会停在抬起位置，用这条把转回垂下。
+		 *   内部会等到位并置零，所以必须在任务里跑。 */
+		if (g_fly_hookhome_req != 0U)
+		{
+			g_fly_hookhome_req = 0U;
+			(void)Fly_HookHomeNow();
+			osDelay(200U);
 		}
 
 		/* ---- 置零请求（0x111 [0x0A, 轴号]）----

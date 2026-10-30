@@ -150,6 +150,7 @@ volatile uint16_t g_fly_grab_dist_mm = FLY_PULL_GRAB_DIST_MM;
 volatile uint8_t  g_fly_learn_req    = 0U;
 volatile uint8_t  g_fly_tofhealth_req = 0U;
 volatile uint8_t  g_fly_tofscan_req   = 0U;
+volatile uint8_t  g_fly_hookhome_req  = 0U;
 
 /* ★ 拉箱前伸距离（mm）—— 现场可调，不靠重编烧录 */
 volatile uint16_t g_fly_pull_fwd_mm  = (uint16_t)FLY_PULL_SLIDE_FWD_MM;
@@ -2003,6 +2004,80 @@ void Fly_SendPullFwdReport(void)
 	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
 }
 
+/**
+  * @brief  ★ M5 抓钩归零上报（0x7E3，魔数 0xBC）
+  *
+  *   [0] 0xBC    [1] 结果 0=成功 / 1=指令被拒 / 2=未确认到位
+  *   [2..3] 归零前位置（int16 小端，逻辑单位）
+  *   [4..5] 归零后位置（int16 小端，应为 0）
+  */
+static void Fly_SendHookHomeReport(uint8_t result, int32_t before, int32_t after)
+{
+	uint8_t  buf[8];
+	int16_t  b16 = (int16_t)((before > 32767) ? 32767 : ((before < -32768) ? -32768 : before));
+	int16_t  a16 = (int16_t)((after  > 32767) ? 32767 : ((after  < -32768) ? -32768 : after));
+
+	buf[0] = 0xBCU;
+	buf[1] = result;
+	buf[2] = (uint8_t)((uint16_t)b16 & 0xFFU);
+	buf[3] = (uint8_t)((uint16_t)b16 >> 8);
+	buf[4] = (uint8_t)((uint16_t)a16 & 0xFFU);
+	buf[5] = (uint8_t)((uint16_t)a16 >> 8);
+	buf[6] = 0U;
+	buf[7] = 0U;
+
+	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+}
+
+uint8_t Fly_HookHomeNow(void)
+{
+	int32_t sign;
+	int32_t before_logical;
+	int32_t after_logical;
+	int32_t units;
+	uint8_t r;
+
+	if (s_ax[FLY_AXIS_HOOK].dev == FLY_DEV_UNKNOWN)
+	{
+		Fly_SendHookHomeReport(1U, 0, 0);
+		return 1U;
+	}
+
+	sign           = (int32_t)FLY_DIR_SIGN_OF(FLY_AXIS_HOOK);
+	before_logical = s_ax[FLY_AXIS_HOOK].pos * sign;
+
+	/* ---- 反向 unwind：把抬起行程退回去，转到垂下位置 ----
+	 * ★ 用【慢速】FLY_LOAD_SPEED：这是开环动作，可能已经顶到结构，
+	 *   慢速能让驱动器更早进入堵转保护，而不是磅一下撞上去。 */
+	units = -(int32_t)(FLY_HOOK_HOME_DEG * FLY_HOOK_UNITS_PER_DEG);
+
+	r = Fly_MoveRelEx(FLY_AXIS_HOOK, units, FLY_LOAD_SPEED, FLY_LOAD_ACCEL, 1U);
+	if (r != 0U)
+	{
+		/* 指令被拒（设备号未知 / 超限幅 / 软限位）
+		 * ★ 软限位：如果置零过，反向会受到 FLY_HOOK_MIN_UNITS(-20°) 限制，
+		 *   这时 unwind 会失败 —— 所以上电归零必须在 SetZeroAll【之前】做。 */
+		Fly_SendHookHomeReport(1U, before_logical, before_logical);
+		return 1U;
+	}
+
+	r = Fly_WaitAxisDone(FLY_AXIS_HOOK, FLY_FLOW_STEP_TIMEOUT_MS);
+	osDelay(FLY_FLOW_STEP_GAP_MS);
+
+	/* ---- 无论是否确认到位，都把当前位置记为零点 ----
+	 * ★ 为什么「未到位也置零」：
+	 *   这是开环动作，如果机械已经顶住了，再等也算不出来。
+	 *   置零至少让「从当前位置算起的动作」是对的，
+	 *   而不是让整个流程因为一次归零失败就跑不了。
+	 *   结果码 2 会告出去，用户能从 0xBC 看到。 */
+	(void)Fly_SetZeroAxis(FLY_AXIS_HOOK);
+
+	after_logical = s_ax[FLY_AXIS_HOOK].pos * sign;
+	Fly_SendHookHomeReport((r != 0U) ? 2U : 0U, before_logical, after_logical);
+
+	return (r != 0U) ? 2U : 0U;
+}
+
 void Fly_SendPosReport(void)
 {
 	static uint8_t axis = 0U;
@@ -2235,6 +2310,12 @@ void Fly_OnCommand(const uint8_t *data, uint8_t dlc)
 		/* ★ 扫 TOF8 真实设备号：只置请求，由 Task_Flybox 执行
 		 *   （要对 16 个设备号逐个发帧并等应答，不能在接收任务里跑）。 */
 		g_fly_tofscan_req = 1U;
+		break;
+
+	case FLY_CMD_HOOK_HOME:
+		/* ★ M5 抓钩归零：只置请求，由 Task_Flybox 执行（要等到位）。
+		 *   用途：流程中途停掉后抓钩停在抬起位置，手动把它转回垂下。 */
+		if (g_fly_flow_running == 0U) { g_fly_hookhome_req = 1U; }
 		break;
 
 	case FLY_CMD_GRAB_DIST:
