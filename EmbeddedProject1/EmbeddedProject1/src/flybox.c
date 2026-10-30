@@ -2401,12 +2401,29 @@ uint8_t Fly_BeltBothJog(int32_t units)
  *         0 = 任一步失败立即中止整轮
  * ========================================================================= */
 
-/* 单步执行
+/* 单步执行（可指定速度 / 加速度），实现在下面 */
+static uint8_t Fly_DoStepSpd(uint8_t step_no, FlyAxis_t ax, int32_t units, uint8_t use_belt,
+                             uint32_t speed, uint32_t accel);
+
+/* 单步执行（用流程默认速度）
  *
  * ★ 返回值：
  *     FLY_FLOW_NEVER_STOP == 0 时：0 = 成功，1 = 失败（调用方会中止整轮）
  *     FLY_FLOW_NEVER_STOP == 1 时：永远返回 0（盲走，失败只记原因码） */
 static uint8_t Fly_DoStep(uint8_t step_no, FlyAxis_t ax, int32_t units, uint8_t use_belt)
+{
+	return Fly_DoStepSpd(step_no, ax, units, use_belt, FLY_FLOW_SPEED, FLY_FLOW_ACCEL);
+}
+
+/* 单步执行（可指定速度 / 加速度）
+ *
+ * ★ 为什么要分速度：
+ *   「抬钩 + 拖箱」是带载动作，力矩需求是空载的好几倍。
+ *   用空载的速度去跑带载动作，冲击电流会顶到驱动器/电源的极限，
+ *   表现就是「抬钩带上箱子后系统停了」。
+ *   所以带载步骤走 FLY_LOAD_SPEED / FLY_LOAD_ACCEL（慢 3 倍）。 */
+static uint8_t Fly_DoStepSpd(uint8_t step_no, FlyAxis_t ax, int32_t units, uint8_t use_belt,
+                             uint32_t speed, uint32_t accel)
 {
 	uint8_t ok = 1U;
 
@@ -2422,7 +2439,7 @@ static uint8_t Fly_DoStep(uint8_t step_no, FlyAxis_t ax, int32_t units, uint8_t 
 	if (use_belt != 0U)
 	{
 		/* 两皮带同步：两帧位置紧挨着发，中间不留延时 */
-		if (Fly_BeltMove(units, FLY_FLOW_SPEED, FLY_FLOW_ACCEL) != 0U)
+		if (Fly_BeltMove(units, speed, accel) != 0U)
 		{
 			g_fly_flow_why = FLY_WHY_SEND;        /* 帧都没发出去 */
 			ok = 0U;
@@ -2435,9 +2452,9 @@ static uint8_t Fly_DoStep(uint8_t step_no, FlyAxis_t ax, int32_t units, uint8_t 
 	else
 	{
 		/* ★ allow_nozero = 1：流程用相对位移，不要求先置零 */
-		if (Fly_MoveRelEx(ax, units, FLY_FLOW_SPEED, FLY_FLOW_ACCEL, 1U) != 0U)
+		if (Fly_MoveRelEx(ax, units, speed, accel, 1U) != 0U)
 		{
-			/* 指令被拒，一帧都没发出去（软限位越界 / 超 400mm / 设备号未知）*/
+			/* 指令被拒，一帧都没发出去（软限位越界 / 超限幅 / 设备号未知）*/
 			g_fly_flow_why = FLY_WHY_REFUSED;
 			ok = 0U;
 		}
@@ -2522,6 +2539,35 @@ static uint8_t Fly_DoStepTo(uint8_t step_no, FlyAxis_t ax, int32_t logical_targe
 	}
 
 	return Fly_DoStep(step_no, ax, delta, 0U);
+}
+
+/* 绝对位置式单步 + 指定速度
+ *
+ * ★ 带载动作（抬钩、拖箱、放钩）必须用这个：
+ *   力矩需求是空载的好几倍，用空载速度跑会顶到驱动器/电源极限。 */
+static uint8_t Fly_DoStepToSpd(uint8_t step_no, FlyAxis_t ax, int32_t logical_target,
+                               uint32_t speed, uint32_t accel)
+{
+	int32_t sign;
+	int32_t cur_logical;
+	int32_t delta;
+
+	if (ax >= FLY_AXIS_COUNT) { return 1U; }
+
+	sign        = (int32_t)FLY_DIR_SIGN_OF(ax);
+	cur_logical = s_ax[ax].pos * sign;
+	delta       = logical_target - cur_logical;
+
+	if ((delta > -1) && (delta < 1))
+	{
+		g_fly_flow_step = step_no;
+		g_fly_flow_why  = FLY_WHY_NONE;
+		Fly_SendFlowReport();
+		osDelay(FLY_FLOW_STEP_GAP_MS);
+		return 0U;
+	}
+
+	return Fly_DoStepSpd(step_no, ax, delta, 0U, speed, accel);
 }
 
 /* ---- 各轴的「逻辑位置地标」----
@@ -2794,16 +2840,24 @@ uint8_t Fly_RunPullOnce(void)
 
 	/* ---- 3. 抓钩抬起 100°：勾住箱子 + 抬到皮带承载面 ----
 	 * ★ 90° 只是勾住，箱子还比皮带面低一点；多抬 10° 才抬得上去。
-	 *   见 flybox.h 的 FLY_HOOK_LIFT_EXTRA_DEG。 */
-	r = Fly_DoStepTo(3U, FLY_AXIS_HOOK, FLY_LAND_HOOK_UP);
+	 *   见 flybox.h 的 FLY_HOOK_LIFT_EXTRA_DEG。
+	 * ★★ 这里用【慢速】FLY_LOAD_SPEED：
+	 *   抬钩是带载动作的开始，力矩需求骤增。用空载速度跑会顶到
+	 *   驱动器/电源极限，表现就是「抬钩带上箱子后系统停了」。 */
+	r = Fly_DoStepToSpd(3U, FLY_AXIS_HOOK, FLY_LAND_HOOK_UP,
+	                    FLY_LOAD_SPEED, FLY_LOAD_ACCEL);
 	if (r != 0U) { goto pull_fail; }
 
-	/* ---- 4. 平台后退，把箱子拖到皮带上方 ---- */
-	r = Fly_DoStepTo(4U, FLY_AXIS_SLIDE, FLY_LAND_SLIDE_HOME);
+	/* ---- 4. 平台后退，把箱子拖到皮带上方 ----
+	 * ★★ 全程带载，力矩最大，必须用慢速。 */
+	r = Fly_DoStepToSpd(4U, FLY_AXIS_SLIDE, FLY_LAND_SLIDE_HOME,
+	                    FLY_LOAD_SPEED, FLY_LOAD_ACCEL);
 	if (r != 0U) { goto pull_fail; }
 
-	/* ---- 5. 抓钩放回，箱子落在皮带上 ---- */
-	r = Fly_DoStepTo(5U, FLY_AXIS_HOOK, FLY_LAND_HOOK_DOWN);
+	/* ---- 5. 抓钩放回，箱子落在皮带上 ----
+	 * ★ 放钩也是带载（箱子重压在钩子上），同样慢速。 */
+	r = Fly_DoStepToSpd(5U, FLY_AXIS_HOOK, FLY_LAND_HOOK_DOWN,
+	                    FLY_LOAD_SPEED, FLY_LOAD_ACCEL);
 	if (r != 0U) { goto pull_fail; }
 
 	/* ---- 6. 平台右转 90°，腾出通道 ---- */
@@ -2858,16 +2912,20 @@ uint8_t Fly_RunPushOnce(void)
 	/* ---- 3. 抓钩抬起 90° 钩住箱子 ----
 	 * ★ 这里【故意】只抬 90°，不跟拉箱一样抬 100°：
 	 *   推箱时箱子已经平放在皮带上，多抬 10° 会把它抬离皮带面，
-	 *   推到一半再落下来容易卡住皮带边缘。 */
-	r = Fly_DoStepTo(3U, FLY_AXIS_HOOK, FLY_LAND_HOOK_UP_PUSH);
+	 *   推到一半再落下来容易卡住皮带边缘。
+	 * ★★ 用慢速：带载动作，同拉箱。 */
+	r = Fly_DoStepToSpd(3U, FLY_AXIS_HOOK, FLY_LAND_HOOK_UP_PUSH,
+	                    FLY_LOAD_SPEED, FLY_LOAD_ACCEL);
 	if (r != 0U) { goto push_fail; }
 
 	/* ---- 4. 平台前伸，把箱子推出去 ---- */
-	r = Fly_DoStepTo(4U, FLY_AXIS_SLIDE, FLY_LAND_SLIDE_OUT);
+	r = Fly_DoStepToSpd(4U, FLY_AXIS_SLIDE, FLY_LAND_SLIDE_OUT,
+	                    FLY_LOAD_SPEED, FLY_LOAD_ACCEL);
 	if (r != 0U) { goto push_fail; }
 
 	/* ---- 5. 抓钩放下，松开箱子 ---- */
-	r = Fly_DoStepTo(5U, FLY_AXIS_HOOK, FLY_LAND_HOOK_DOWN);
+	r = Fly_DoStepToSpd(5U, FLY_AXIS_HOOK, FLY_LAND_HOOK_DOWN,
+	                    FLY_LOAD_SPEED, FLY_LOAD_ACCEL);
 	if (r != 0U) { goto push_fail; }
 
 	/* ---- 6. 平台后退回来 ---- */
