@@ -149,6 +149,7 @@ volatile uint8_t  g_fly_flow_stall   = 0U;
 volatile uint16_t g_fly_grab_dist_mm = FLY_PULL_GRAB_DIST_MM;
 volatile uint8_t  g_fly_learn_req    = 0U;
 volatile uint8_t  g_fly_tofhealth_req = 0U;
+volatile uint8_t  g_fly_tofscan_req   = 0U;
 
 /* ★ 拉箱前伸距离（mm）—— 现场可调，不靠重编烧录 */
 volatile uint16_t g_fly_pull_fwd_mm  = (uint16_t)FLY_PULL_SLIDE_FWD_MM;
@@ -1915,6 +1916,35 @@ void Fly_SendHealthReport(void)
 }
 
 /**
+  * @brief  ★ TOF8 设备号扫描上报（0x7E3，魔数 0xB9，两帧）
+  *
+  *   [0] 0xB9    [1] 帧号(0/1)    [2] 扫到的总数
+  *   [3..7] 本帧包含的设备号（每帧最多 5 个，共 10 个）
+  */
+void Fly_SendTofScanReport(void)
+{
+	uint8_t buf[8];
+	uint8_t page;
+	uint8_t i;
+
+	for (page = 0U; page < 2U; page++)
+	{
+		buf[0] = 0xB9U;
+		buf[1] = page;
+		buf[2] = g_tof8_scan_cnt;
+
+		for (i = 0U; i < 5U; i++)
+		{
+			uint8_t n = (uint8_t)(page * 5U + i);
+			buf[3U + i] = (n < g_tof8_scan_cnt) ? g_tof8_scan_list[n] : 0xFFU;
+		}
+
+		(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+		osDelay(15U);
+	}
+}
+
+/**
   * @brief  ★ TOF 健康诊断上报（0x7E3，魔数 0xB7）
   *
   *   ★ 一个槽位一帧，按槽位 0..TOF8_DEV_NUM-1 依次发，帧间留 20ms。
@@ -2199,6 +2229,12 @@ void Fly_OnCommand(const uint8_t *data, uint8_t dlc)
 			if ((v > 0U) && (v <= 1000U)) { g_fly_pull_fwd_mm = v; }
 			Fly_SendPullFwdReport();
 		}
+		break;
+
+	case FLY_CMD_TOF_SCAN:
+		/* ★ 扫 TOF8 真实设备号：只置请求，由 Task_Flybox 执行
+		 *   （要对 16 个设备号逐个发帧并等应答，不能在接收任务里跑）。 */
+		g_fly_tofscan_req = 1U;
 		break;
 
 	case FLY_CMD_GRAB_DIST:

@@ -947,6 +947,17 @@ typedef enum
                                                  *       0x111 [0x11, 0xF4, 0x01]  = 500mm
                                                  *     回复帧 0x7E3 魔数 0xB8。
                                                  *   ★ 只存 RAM，上电回到 FLY_PULL_SLIDE_FWD_MM。 */
+#define FLY_CMD_TOF_SCAN                0x10U   /* ★ 扫描 TOF8 真实设备号（0..15）
+                                                 *
+                                                 *   ★★★ 激光不工作时第一件要查的事 ★★★
+                                                 *     car_cfg.h 里写的 TOF8_DEV0=26 / TOF8_DEV1=25
+                                                 *     是从文档图片抄的，实际可能不是这两个。
+                                                 *     设备号填错的表现就是「发什么都没应答」。
+                                                 *
+                                                 *   回复帧 0x7E3 魔数 0xB9（两帧）：
+                                                 *     [0] 0xB9   [1] 帧号(0/1)   [2] 扫描到的设备号个数
+                                                 *     [3..7] 本帧包含的设备号（最多 10 个分两帧）
+                                                 *   ★ 扫到 0 个 = TOF 根本没接、没电、或不在这个总线上 */
 
 /* 0x05 语义动作码 */
 #define FLY_ACT_HOOK_UP                 0x01U   /* M5 抓钩抬起 90°（钩住） */
@@ -1379,6 +1390,7 @@ void Fly_SendFlowReport(void);
 extern volatile uint16_t g_fly_grab_dist_mm;
 extern volatile uint8_t  g_fly_learn_req;
 extern volatile uint8_t  g_fly_tofhealth_req;
+extern volatile uint8_t  g_fly_tofscan_req;
 
 /* ★ 拉箱前伸距离（mm）—— 盲走与总行程都用它
  *
@@ -1445,6 +1457,15 @@ void Fly_SendPullFwdReport(void);
   *   ★ 必须在 Task_Flybox 里调用（用当前任务句柄算栈水位）。
   */
 void Fly_SendHealthReport(void);
+
+/**
+  * @brief  ★ TOF8 设备号扫描上报（0x7E3，魔数 0xB9，两帧）
+  *   [1] 帧号 0/1    [2] 扫到的总数    [3..7] 设备号列表
+  *
+  *   ★ 扫到 0 个 = TOF 没接/没电/不在这条总线；
+  *     扫到非 25/26 的号 = car_cfg.h 配错了，改成扫到的号即可。
+  */
+void Fly_SendTofScanReport(void);
 
 /* ---- Watch 变量 ---- */
 extern volatile uint8_t  g_fly_scan_cnt;

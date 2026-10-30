@@ -209,4 +209,53 @@ uint8_t Tof8_GetResolution(uint8_t slot);
   */
 uint8_t Tof8_GetFrequency(uint8_t slot);
 
+/* =========================================================================
+ *              ★ 5. 设备号扫描（2026-10-30 新增）
+ *
+ *  ★ 为什么需要它：
+ *    TOF8 靠【设备号】寻址（0x0408 的 Data[0]），设备号只能从文档图片上看，
+ *    或者一个个试。填错了（比如实际是 0x0A 而我们填 25）的表现就是
+ *    「发什么都没应答」，但模块本身是好的。
+ *
+ *    电机侧的 Fly_ScanDevices() 扫不出来 —— 它发的是电机查询通道
+ *    （0x0408 的 Data[1]=0x25），TOF8 不认那个通道。
+ *
+ *    所以必须专门扫：对 0..15 每个设备号发一次 TOF8 的「取距离」请求
+ *    （通道 12），看谁回 0x0409 且通道号是 12。
+ *
+ *  ★ ★★ 关于 SN：TOF8 不需要 SN 绑定 ★★★
+ *
+ *    协议里 TOF8 只有 0x0316 / 0x0408 / 0x0409 / 0x0793 / 0x0794 五个 ID，
+ *    【完全没有】0x0312（SN 广播）和 0x0313（SN 绑定）。
+ *    电机不绑 SN 不转，是因为电机的 0x0413/0416 用「马达号」寻址，
+ *    而马达号要靠 0x0313 写进去；TOF8 没有这一层，它直接用设备号。
+ *
+ *    所以「激光雷达是不是没绑 SN」这个担心可以排除 —— 不需要绑。
+ * ========================================================================= */
+
+/**
+  * @brief  ★ 扫描 0..15 全部设备号，找出哪些是 TOF8
+  * @param  gap_ms  每个设备号之间的间隔（建议 15~30ms，给模块应答时间）
+  * @retval 找到的 TOF8 设备号个数
+  * @note   结果放在 g_tof8_scan_list[] / g_tof8_scan_cnt（见下方 extern）
+  *
+  * ★ 必须在任务上下文调用（内部有 osDelay）。
+  */
+uint8_t Tof8_ScanDevices(uint32_t gap_ms);
+
+/* 扫描结果（供上报） */
+extern volatile uint8_t g_tof8_scan_cnt;
+extern volatile uint8_t g_tof8_scan_list[16];
+
+/**
+  * @brief  ★ 直接按设备号取一次距离（不查 s_dev_list，用于扫描/诊断）
+  * @param  dev        物理设备号
+  * @param  timeout_ms 超时
+  * @retval 距离 mm；无应答/无效返回 TOF8_DIST_MM_INVALID
+  *
+  * ★ 用途：确认「哪个设备号在哪个位置、读数是否合理」，
+  *   不用改 car_cfg.h 重烧就能验证设备号是否填对。
+  */
+uint16_t Tof8_ReadDistanceByDev(uint8_t dev, uint32_t timeout_ms);
+
 #endif /* __TOF8_H__ */

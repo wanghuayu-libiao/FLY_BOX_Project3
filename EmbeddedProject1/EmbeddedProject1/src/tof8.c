@@ -93,6 +93,27 @@ static const uint8_t s_dev_list[TOF8_DEV_NUM] =
 
 static Tof8Slot_t s_slot[TOF8_DEV_NUM];
 
+/* =========================================================================
+ *        ★ 设备号扫描缓存（2026-10-30 新增）
+ *
+ *  ★ 为什么不复用 s_slot：
+ *    s_slot 只有 TOF8_DEV_NUM 个槽位，而且按 s_dev_list 里【配置好的】
+ *    设备号索引。扫描的目的恰恰是「不知道设备号是多少」，
+ *    所以需要一张按「任意设备号 0..15」索引的表。
+ *
+ *  ★ 扫描期间的帧捕获：
+ *    Tof8_OnFrame() 开头会按 Tof8_FindSlot() 过滤，设备号不在配置表里的
+ *    帧会被放行给电机模块 —— 那样就扫不到了。
+ *    所以扫描期在过滤【之前】先记录一笔。
+ * ========================================================================= */
+
+volatile uint8_t  g_tof8_scan_cnt = 0U;
+volatile uint8_t  g_tof8_scan_list[16];
+
+static volatile uint8_t  s_scanning = 0U;         /* 1 = 正在扫描 */
+static volatile uint8_t  s_scan_hit[16];          /* 该设备号有应答 */
+static volatile uint16_t s_scan_dist[16];         /* 该设备号最新距离 mm */
+
 /* Private function prototypes -----------------------------------------------*/
 
 static uint8_t  Tof8_SendReq(uint8_t slot, uint8_t ch, uint8_t b2);
@@ -289,6 +310,107 @@ uint8_t Tof8_Reset(uint8_t slot, uint8_t target)
 }
 
 /* =========================================================================
+ *                       ★ 设备号扫描（不依赖 s_dev_list）
+ * ========================================================================= */
+
+/** @brief 按「任意设备号」发一帧请求（扫描专用，不走 s_dev_list） */
+static uint8_t Tof8_SendReqRaw(uint8_t dev, uint8_t ch, uint8_t b2)
+{
+	uint8_t buf[8];
+
+	buf[0] = (uint8_t)(dev & 0x0FU);
+	buf[1] = ch;
+	buf[2] = b2;
+	buf[3] = 0U;
+	buf[4] = 0U;
+	buf[5] = 0U;
+	buf[6] = 0U;
+	buf[7] = 0U;
+
+	return (Can_SendStd(TOF8_ID_REQ, buf, 8U) == 0U) ? 1U : 0U;
+}
+
+uint8_t Tof8_ScanDevices(uint32_t gap_ms)
+{
+	uint8_t dev;
+
+	if (gap_ms == 0U) { gap_ms = 20U; }
+
+	g_tof8_scan_cnt = 0U;
+	for (dev = 0U; dev < 16U; dev++)
+	{
+		s_scan_hit[dev]  = 0U;
+		s_scan_dist[dev] = TOF8_DIST_MM_INVALID;
+	}
+
+	s_scanning = 1U;
+
+	/* ---- 每个设备号发两次（防丢帧），中间留间隔 ---- */
+	for (dev = 0U; dev < 16U; dev++)
+	{
+		(void)Tof8_SendReqRaw(dev, TOF8_CH_DISTANCE, 0U);
+		osDelay(gap_ms);
+		(void)Tof8_SendReqRaw(dev, TOF8_CH_DISTANCE, 0U);
+		osDelay(gap_ms);
+	}
+
+	s_scanning = 0U;
+
+	/* ---- 汇总：谁应答了就记谁 ---- */
+	for (dev = 0U; dev < 16U; dev++)
+	{
+		if (s_scan_hit[dev] != 0U)
+		{
+			if (g_tof8_scan_cnt < 16U)
+			{
+				g_tof8_scan_list[g_tof8_scan_cnt] = dev;
+				g_tof8_scan_cnt++;
+			}
+		}
+	}
+
+	return g_tof8_scan_cnt;
+}
+
+uint16_t Tof8_ReadDistanceByDev(uint8_t dev, uint32_t timeout_ms)
+{
+	uint32_t t0;
+
+	dev = (uint8_t)(dev & 0x0FU);
+
+	if (timeout_ms == 0U) { timeout_ms = 150U; }
+
+	/* ★ 临时开一次扫描捕获模式：复用同一条「记录任意设备号应答」的路径，
+	 *   这样不需要动 s_dev_list 也能读到数据。 */
+	s_scan_hit[dev]  = 0U;
+	s_scan_dist[dev] = TOF8_DIST_MM_INVALID;
+
+	if (s_scanning == 0U) { s_scanning = 1U; }
+
+	t0 = HAL_GetTick();
+	for (;;)
+	{
+		(void)Tof8_SendReqRaw(dev, TOF8_CH_DISTANCE, 0U);
+		osDelay(TOF8_REQ_GAP_MS);
+
+		if ((s_scan_hit[dev] != 0U) && (s_scan_dist[dev] != TOF8_DIST_MM_INVALID))
+		{
+			uint16_t d = s_scan_dist[dev];
+			s_scanning = 0U;
+			return d;
+		}
+
+		if ((uint32_t)(HAL_GetTick() - t0) >= timeout_ms)
+		{
+			break;
+		}
+	}
+
+	s_scanning = 0U;
+	return TOF8_DIST_MM_INVALID;
+}
+
+/* =========================================================================
  *                              接收解析
  * ========================================================================= */
 
@@ -314,6 +436,26 @@ uint8_t Tof8_OnFrame(const CanFrame_t *frame)
 	if (frame->dlc < 1U)
 	{
 		return 0U;
+	}
+
+	/* ★★★ 扫描捕获：必须在「按设备号过滤」之前 ★★★
+	 *
+	 *   扫描的目的就是找出「设备号到底是多少」，所以这时 s_dev_list
+	 *   里配的值很可能是错的。如果先过滤，正确设备号的应答反而会被
+	 *   放行给电机模块，永远扫不到。
+	 *
+	 *   只认「0x0409 且通道 12（取距离）」的帧：
+	 *   电机也发 0x0409，但通道号是查询类型（0x25 等），不会撞。 */
+	if ((s_scanning != 0U) &&
+	    (frame->id == TOF8_ID_RESP) &&
+	    (frame->dlc >= 5U) &&
+	    (frame->data[1] == TOF8_CH_DISTANCE))
+	{
+		uint8_t dev = (uint8_t)(frame->data[0] & 0x0FU);
+		uint16_t raw = (uint16_t)frame->data[2] | ((uint16_t)frame->data[3] << 8);
+
+		s_scan_hit[dev]  = 1U;
+		s_scan_dist[dev] = Tof8_DecodeDist(raw);
 	}
 
 	/* 设备号不是本驱动管的 -> 放行给电机模块 */

@@ -915,6 +915,17 @@ static void Task_Flybox(void const *argument)
 			Fly_SendTofHealth();
 		}
 
+		/* ---- TOF 设备号扫描（0x111 [0x10]）----
+		 * ★ 对 0..15 每个设备号发一次取距离请求，看谁应答。
+		 *   这是排查「激光填的设备号对不对」的唯一手段 ——
+		 *   电机侧的扫描发的是电机通道，TOF8 不认。 */
+		if (g_fly_tofscan_req != 0U)
+		{
+			g_fly_tofscan_req = 0U;
+			(void)Tof8_ScanDevices(20U);
+			Fly_SendTofScanReport();
+		}
+
 		/* ---- 置零请求（0x111 [0x0A, 轴号]）----
 		 * ★ 前提：人已经把机构摆到该轴的零点姿态。
 		 *   置零只是「把当前位置记为 0」，不会让机构动。 */
