@@ -1362,6 +1362,8 @@ extern volatile uint8_t g_fly_flow_which;
 #define FLY_WHY_SEND     3U   /* 皮带帧发送失败（CAN 发不出去）*/
 #define FLY_WHY_NO_TOF   4U   /* ★ 读不到激光距离，已退回固定距离盲走 */
 #define FLY_WHY_TOF_STALL 5U  /* ★ 激光读数不跟着平台动（测的不是箱子/不是纵向），已退回盲走补齐 */
+#define FLY_WHY_TOF_NEAR 6U   /* ★ 激光说「已经比抓取距离还近」-> 本步不动
+                               *   ★ 看到这个码且平台确实离箱子很远，说明 TOF 测错了东西 */
 extern volatile uint8_t g_fly_flow_why;
 
 /* 堵转/未到位标志（0xB5 帧 [7] bit1）
