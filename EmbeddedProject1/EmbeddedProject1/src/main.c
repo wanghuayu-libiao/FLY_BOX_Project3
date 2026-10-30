@@ -732,6 +732,12 @@ static void Task_Flybox(void const *argument)
 	Fly_SetBootStage(1U);
 	Fly_TofInit();
 
+	/* ★ 上电就把 TOF 健康状态倒出来一次。
+	 *   意义：如果这里「应答计数 = 0」，那后面的激光靠近必然失败，
+	 *         不要再去猜流程逻辑 —— 先解决 TOF 通不通。
+	 *   ★ 想看最新状态随时发 0x111 [0x0F]。 */
+	Fly_SendTofHealth();
+
 	/* 等电机内部启动完成 */
 	Fly_SetBootStage(2U);
 	osDelay(1000U);
@@ -827,42 +833,85 @@ static void Task_Flybox(void const *argument)
 	for (;;)
 	{
 		/* ---- 业务流程请求（0x111 [0x0D, 1=拉箱 / 2=推箱]）----
-		 * ★ 必须在任务里执行：流程内部每步都要等到位。 */
+		 * ★ 必须在任务里执行：流程内部每步都要等到位。
+		 *
+		 * ★★★ 每次只跑【一轮】，循环靠外层 for(;;) 重新置请求 ★★★
+		 *
+		 *   原来是 do{...}while() 在里面一直转，结果有两个毛病：
+		 *     ① 其它请求（置零 / 学习抓取距离 / 点动 / TOF 诊断）
+		 *        全都被饿死 —— 流程一跑起来就再也收不到命令。
+		 *     ② 发 0x111 [0x02] 停止 也没用，因为没人检查它。
+		 *   改成每轮返回外层，两个问题一起解决。 */
 		if ((g_fly_flow_req != 0U) && (g_fly_flow_running == 0U))
 		{
+			uint8_t failed;
+
 			g_fly_flow_req = 0U;
 
-			do
+			if (g_fly_flow_which == FLY_FLOW_PULL)
 			{
-				uint8_t fail;
+				failed = Fly_RunPullOnce();
+			}
+			else
+			{
+				failed = Fly_RunPushOnce();
+			}
 
-				if (g_fly_flow_which == FLY_FLOW_PULL)
-				{
-					fail = Fly_RunPullOnce();
-				}
-				else
-				{
-					fail = Fly_RunPushOnce();
-				}
+			/* ★ 失败处理按 FLY_FLOW_NEVER_STOP 走：
+			 *   1 = 盲走模式，失败也继续下一轮（调试期用）
+			 *   0 = 任一步失败就停下，不再自动开始下一轮
+			 *
+			 * ★ 这里写成普通 if 而不是条件编译拼语句：
+			 *   拼接写法在 (NEVER_STOP=0, LOOP=0) 的组合下会留下一个
+			 *   没有主体的 else，直接编译失败 —— 这种坑不留。 */
+			{
+				uint8_t keep_going = 1U;
 
-				/* ★ 任何一步失败就整轮停下。
-				 *   后面没有限位挡块，失败后继续跑下一轮 = 闭着眼睛往结构上撞。 */
-				if (fail != 0U) { break; }
-
-#if (FLY_FLOW_LOOP == 0)
-				break;                  /* 不循环：跑一轮就回待机 */
+#if (FLY_FLOW_NEVER_STOP == 0)
+				if (failed != 0U) { keep_going = 0U; }
 #else
-	#if (FLY_FLOW_LOOP_ALT != 0)
-				/* 拉箱 / 推箱 交替：拉完接着推，推完再拉 */
-				g_fly_flow_which = (g_fly_flow_which == FLY_FLOW_PULL)
-				                 ? FLY_FLOW_PUSH
-				                 : FLY_FLOW_PULL;
-	#endif
-				osDelay(FLY_FLOW_STEP_GAP_MS);
+				(void)failed;
 #endif
-			} while (g_fly_flow_req == 0U);
 
-			osDelay(200U);
+#if (FLY_FLOW_LOOP != 0)
+				if (keep_going != 0U)
+				{
+	#if (FLY_FLOW_LOOP_ALT != 0)
+					/* 拉箱 / 推箱 交替：拉完接着推，推完再拉 */
+					g_fly_flow_which = (g_fly_flow_which == FLY_FLOW_PULL)
+					                 ? FLY_FLOW_PUSH
+					                 : FLY_FLOW_PULL;
+	#endif
+					osDelay(FLY_FLOW_STEP_GAP_MS);
+					g_fly_flow_req = 1U;    /* ★ 重新置请求 = 下一轮 */
+				}
+#else
+				(void)keep_going;           /* 不循环：跑一轮就回待机 */
+#endif
+			}
+
+			osDelay(50U);
+		}
+
+		/* --- 分隔：下面是需要被服务到的其它请求 --- */
+
+		/* ---- 学习抓取距离（0x111 [0x0E] 不带参数）----
+		 * ★ 必须在任务里执行：要读 TOF，不能在 CAN 接收任务里阻塞。
+		 * ★ 前提：人已经手动把平台点到「钩子刚好能勾住箱子」的位置。
+		 *   固件只是把此刻的 TOF 读数记下来当停止点。 */
+		if (g_fly_learn_req != 0U)
+		{
+			g_fly_learn_req = 0U;
+			(void)Fly_LearnGrabDist();
+		}
+
+		/* ---- TOF 健康诊断（0x111 [0x0F]）----
+		 * ★ 把两路 TOF 的「设备号 / 应答计数 / 是否有数据 / 当前距离」全倒出来。
+		 *   这是判断「激光到底在不在总线上」最直接的一帧。 */
+		if (g_fly_tofhealth_req != 0U)
+		{
+			g_fly_tofhealth_req = 0U;
+			Fly_SendTofHealth();
 		}
 
 		/* ---- 置零请求（0x111 [0x0A, 轴号]）----
@@ -978,7 +1027,13 @@ osThreadDef(Task_Tof8, Task_Tof8, osPriorityNormal, 0, 320);
  *   再加上 Fly_TofInit 那一路，1.5KB 附近有溢出风险。
  *   栈溢出在 FreeRTOS 里表现为 HardFault 或莫名卡死，
  *   现象就是「上电什么都不动、灯也不闪」—— 和最开始的症状一样。 */
-osThreadDef(Task_Flybox, Task_Flybox, osPriorityAboveNormal, 0, 512);
+/* ★ 栈从 512 提到 768：
+ *   业务流程的调用链变深了（流程 -> 靠近 -> TOF 闭环 -> 增量 -> 运动 -> CAN 发帧），
+ *   而每次 CAN 发帧都要在栈上放 CAN_TxHeaderTypeDef + 数据缓冲。
+ *   512 字（2KB）在调试期还够，但已经贴着边界 —— 栈溢出会直接 HardFault，
+ *   表现就是「跑到某一步突然全停、CAN 上一片死寂」，很难和逻辑 bug 区分。
+ *   多给 1KB 换取不用怀疑这一项。 */
+osThreadDef(Task_Flybox, Task_Flybox, osPriorityAboveNormal, 0, 768);
 
 /* Exported functions --------------------------------------------------------*/
 

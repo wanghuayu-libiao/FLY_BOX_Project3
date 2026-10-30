@@ -348,9 +348,12 @@ typedef enum
 #define FLY_SWING_MIN_UNITS             (-(int32_t)(FLY_SWING_BACK_DEG * FLY_SWING_UNITS_PER_DEG))
 #define FLY_SWING_MAX_UNITS             ((int32_t)(FLY_SWING_FWD_DEG * FLY_SWING_UNITS_PER_DEG))
 
-/* ---- M5 抓钩：零点 = 垂下 ---- */
-#define FLY_HOOK_FWD_DEG                100.0f  /* ★TODO 抬起的行程 */
-#define FLY_HOOK_BACK_DEG               20.0f   /* ★TODO 反方向余量 */
+/* ---- M5 抓钩：零点 = 垂下 ----
+ * ★ 2026-10-30：抓钩要抬到 100°（90° 勾住 + 10° 抬到皮带面），
+ *   所以正向行程从 100° 提到 115°，给目标值留 15° 余量。
+ *   否则关棹 FLY_IGNORE_LIMITS 之后，正好走到限位点的目标会被判越界。 */
+#define FLY_HOOK_FWD_DEG                115.0f  /* ★ 抬起的行程（> 100° 目标）*/
+#define FLY_HOOK_BACK_DEG               20.0f   /* ★ 反方向余量 */
 #define FLY_HOOK_MIN_UNITS              (-(int32_t)(FLY_HOOK_BACK_DEG * FLY_HOOK_UNITS_PER_DEG))
 #define FLY_HOOK_MAX_UNITS              ((int32_t)(FLY_HOOK_FWD_DEG * FLY_HOOK_UNITS_PER_DEG))
 
@@ -384,22 +387,120 @@ typedef enum
  * ========================================================================= */
 
 /* ---- 各步的物理位移量 ---- */
-#define FLY_PULL_SLIDE_FWD_MM           300.0f  /* 平台前伸到抓取位 */
+#define FLY_PULL_SLIDE_FWD_MM           300.0f  /* 平台前伸到抓取位（盲走兼兜底用）*/
 #define FLY_PULL_SLIDE_BACK_MM          FLY_PULL_SLIDE_FWD_MM   /* 拖回同样距离 */
 #define FLY_HOOK_DEG                    90.0f   /* 抓钩抬起 / 放回 90° */
 #define FLY_SWING_DEG                   90.0f   /* 平台右转让位 / 转回 90° */
 #define FLY_BELT_FEED_MM                100.0f  /* 皮带正向输送（★ 300 -> 100，缩小 3 倍）*/
 #define FLY_BELT_ROOM_MM                50.0f   /* 推箱前皮带前移让位（★ 150 -> 50，缩小 3 倍）*/
 
+/* =========================================================================
+ *    ★★★ 4.16 抓钩多抬 10°（2026-10-30 现场装箱后确认）★★★
+ *
+ *  ★ 现场现象：
+ *    抓钩抬到 90° 把箱子勾住之后，箱底比两条皮带的承载面【低一点】，
+ *    直接往回拉会把箱子刮在皮带边缘 / 拖不进皮带之间的通道。
+ *
+ *  ★ 处理：
+ *    抓钩不止抬 90°，再多抬 10°（= 100°），把箱子一起抬到与皮带
+ *    承载面齐平的高度，然后才往回拉 — 这样箱子是“抬着走”而不是“拖着走”。
+ *
+ *  ★ 标定方法（装好箱子量一次就行）：
+ *    看箱子底面与皮带面相差多少 mm，多抬的角度 ≈ 高差 / 钩臂半径（单位 mm）
+ *    新值 = 旧值 × 实测需要抬到的角度 ÷ 实际转到的角度
+ *
+ *  ★ 先给 10° 偏小的值更安全：抬不够只会拖到，抬过头会把钩子顶到结构。 */
+#define FLY_HOOK_LIFT_EXTRA_DEG         10.0f   /* ★ 额外多抬的角度 */
+#define FLY_HOOK_GRAB_DEG               (FLY_HOOK_DEG + FLY_HOOK_LIFT_EXTRA_DEG)
+                                                /* = 100°，勾住 + 抬到皮带面 */
+
 /* ---- 换算成指令单位（流程函数直接用这些）---- */
 #define FLY_PULL_SLIDE_FWD_UNITS        ((int32_t)(FLY_PULL_SLIDE_FWD_MM  * FLY_UNITS_PER_MM))
 #define FLY_PULL_SLIDE_BACK_UNITS       ((int32_t)(FLY_PULL_SLIDE_BACK_MM * FLY_UNITS_PER_MM))
-#define FLY_HOOK_UP_UNITS               ((int32_t)(FLY_HOOK_DEG   * FLY_HOOK_UNITS_PER_DEG))
-#define FLY_HOOK_DOWN_UNITS             ((int32_t)(FLY_HOOK_DEG   * FLY_HOOK_UNITS_PER_DEG))
+/* ★ 抬起用 GRAB（100°）：勾住箱子的同时抬到皮带平面，
+ *   放回仍然回到 0°，所以下行行程也是 100°（绝对值定位，不需要单独给）。 */
+#define FLY_HOOK_UP_UNITS               ((int32_t)(FLY_HOOK_GRAB_DEG * FLY_HOOK_UNITS_PER_DEG))
+#define FLY_HOOK_DOWN_UNITS             ((int32_t)(FLY_HOOK_GRAB_DEG * FLY_HOOK_UNITS_PER_DEG))
 #define FLY_SWING_PARK_UNITS            ((int32_t)(FLY_SWING_DEG  * FLY_SWING_UNITS_PER_DEG))
 #define FLY_SWING_WORK_UNITS            ((int32_t)(FLY_SWING_DEG  * FLY_SWING_UNITS_PER_DEG))
 #define FLY_BELT_FEED_UNITS             ((int32_t)(FLY_BELT_FEED_MM * FLY_UNITS_PER_MM))
 #define FLY_BELT_ROOM_UNITS             ((int32_t)(FLY_BELT_ROOM_MM * FLY_UNITS_PER_MM))
+
+/* =========================================================================
+ *    ★★★ 4.17 用激光测距（TOF8）对准箱子（2026-10-30）★★★
+ *
+ *  ★ 为什么要换成测距：
+ *    原来拉箱第 2 步是“盲走 300mm”，箱子摆得前后差一点，
+ *    钩子就勾不到（太远）或者顶到箱子（太近）。
+ *    现在改成：边走边看距离，到了 7cm 就停，位置天然对准。
+ *
+ *  ★ 两级靠近（快 + 准）：
+ *      第一段粗走：读到初始距离 d0，一次性走掉 (d0 - 目标 - 余量)，
+ *                  行进速度快，几秒就能靠近。
+ *      第二段精走：剩下的几十毫米用 10mm 小步 + 读一次收一次，
+ *                  精度等于步长，不会冲过头。
+ *
+ *    ★ 为什么不全程用小步：小步每次都要“走一步 -> 停稳 -> 读数”，
+ *      300mm 要走 30 次，太慢。粗走 + 精走能用同样的精度快好几倍。
+ *
+ *  ★ 读不到距离怎么办（没插 / 没配置 / 读数无效）：
+ *    自动退回“盲走 FLY_PULL_SLIDE_FWD_MM”，保持和以前一样的行为，
+ *    不会因为传感器掉线就整个流程不动。
+ * ========================================================================= */
+
+/* 1 = 用激光测距靠近箱子；0 = 退回固定距离盲走 */
+#define FLY_PULL_USE_TOF                1
+
+/* 距箱子多少毫米时抬手能钩住（现场给的 7cm）
+ *
+ * ★★★ 这个值是【默认值】，实际跑的时候用变量 g_fly_grab_dist_mm ★★★
+ *
+ *   TOF 自己不知道钩子在哪 —— 它只能告诉你「传感器到箱子多少毫米」。
+ *   「钩尖刚好能勾住」是传感器安装位置与钩臂长度之间的机械关系，
+ *   这个数只能靠【量出来】或【学出来】。
+ *
+ * 两种给法：
+ *   ① 学习（推荐）：手动把平台一点点点到「钩子刚好能勾住」的位置，
+ *      然后发 0x111 [0x0E]（不带参数），固件把当前 TOF 读数记下来。
+ *      不用尺、不用算，眼睛看着对就行。
+ *   ② 直接设：发 0x111 [0x0E, lo, hi]（mm，u16 小端）
+ *
+ * 学到的值只存在 RAM 里，每次上电重置回下面的默认值。
+ * 定下来之后把下面的宏改成学到的值，就不用每次重学。 */
+#define FLY_PULL_GRAB_DIST_MM           70U
+
+/* 粗走时故意少走的余量（mm）：留给精走收敛，避免一下子冲过目标 */
+#define FLY_PULL_TOF_COARSE_MARGIN_MM   30.0f
+
+/* 精走额外允许的富余行程（mm）
+ * ★ 精走总共只允许走「粗走余量 + 这个值」。
+ *   如果 TOF 看的不是箱子而是远处墙面，就会撞到这个上限而停下 ——
+ *   而不是一直往前走 1.5 米去撞结构。 */
+#define FLY_PULL_TOF_UNEXPECTED_MM      80.0f
+
+/* 粗走的最大行程（mm）
+ *
+ * ★★★ 2026-10-30 修正：原来写死 300mm，导致激光根本没用上 ★★★
+ *
+ *   原来的限幅把激光靠近锁死在「300mm 粗走 + 110mm 精走」以内，
+ *   箱子稍微远一点就永远到不了 7cm；而一旦激光失效，
+ *   盲走兜底又正好走 300mm —— 两种情况的行程一模一样，
+ *   肉眼看就是「不管有没有激光，都只走 30cm」。
+ *
+ *   现在改成跟滑台真实行程挂钩：只要激光确认还没到，就允许继续走。
+ *   上限 = 滑台行程 FLY_SLIDE_TRAVEL_MM 的 95%，留 5% 余量。 */
+#define FLY_PULL_TOF_APPROACH_MAX_MM    (FLY_SLIDE_TRAVEL_MM * 0.95f)
+
+/* 粗走限幅：只要不超过总接近上限，粗走就可以走完整个差值 */
+#define FLY_PULL_TOF_COARSE_MAX_MM      FLY_PULL_TOF_APPROACH_MAX_MM
+
+/* 靠近过程的总超时（粗走 + 精走）*/
+#define FLY_PULL_TOF_TIMEOUT_MS         30000U
+
+/* 靠近速度（指令单位/s）：6000 = 60mm/s。
+ * ★ 粗走用 FLY_FLOW_SPEED 更快，这个用于精走。 */
+#define FLY_APPROACH_SPEED              6000U
+
 
 /* 流程每步的速度 / 加速度
  * ★ 速度 = 指令单位/秒。12000 单位/s ÷ 100 单位/mm = 120mm/s。
@@ -454,7 +555,9 @@ typedef enum
  *
  * ★ 打开后 0x7E3 的 [5] 仍然记录失败原因码，
  *   所以「流程走完了」不等于「每步都正常」—— 还是要看那个字节。 */
+#ifndef FLY_FLOW_NEVER_STOP
 #define FLY_FLOW_NEVER_STOP             1
+#endif
 
 /* 上电后是否自动把「当前位置」当成零点
  *   0 = 不自动（★推荐）：必须人工确认姿态后发 0x111 [0x0A]
@@ -611,11 +714,15 @@ typedef enum
 #define FLY_BOOT_FLOW                   FLY_FLOW_PULL
 
 /* 流程是否循环
- *   0 = 跑一轮就停在待机
- *   1 = 一直循环（★ 当前）
+ *   0 = 跑一轮就停在待机（★ 当前：先看一轮动作对不对）
+ *   1 = 一直循环
  *
- * ★ 出错（某一步失败）时无论这里怎么设都会停 —— 失败后继续跑就是盲走。 */
-#define FLY_FLOW_LOOP                   1
+ * ★ 改成 0 的理由：现在盲走 + 不中断，跑错了也停不下来。
+ *   先跑一轮看清楚，确认动作顺序和行程都对，再把这里改回 1。
+ * ★ 出错（某一步失败）时按 FLY_FLOW_NEVER_STOP 决定是否继续。 */
+#ifndef FLY_FLOW_LOOP
+#define FLY_FLOW_LOOP                   0
+#endif
 
 /* 循环时是否「拉箱 / 推箱」交替
  *   0 = 只重复跑 FLY_BOOT_FLOW 那一个
@@ -623,7 +730,9 @@ typedef enum
  *
  * ★ 选 1 的理由：拉箱把外面的箱子拖到皮带上，
  *   推箱再把箱子推向另一侧，两个动作本来就是一对。 */
+#ifndef FLY_FLOW_LOOP_ALT
 #define FLY_FLOW_LOOP_ALT               1
+#endif
 
 /* =========================================================================
  *                   5. 默认速度 / 加速度 / 到位判据
@@ -768,6 +877,14 @@ typedef enum
                                                  *   [2..3] 步长mm u16LE  [4] 步数 */
 #define FLY_CMD_BELT_JOG                0x0CU   /* ★ 两条皮带同步点动：[1]方向(0负/1正) [2..3]距离mm u16LE */
 #define FLY_CMD_RUN_FLOW                0x0DU   /* ★ 跑业务流程：[1] 1=拉箱 2=推箱 */
+#define FLY_CMD_GRAB_DIST               0x0EU   /* ★ 抓取距离：
+                                                 *   不带参数（DLC<=1）= 学习：把当前 TOF 读数记为抓取距离
+                                                 *   带参数（DLC>=3）  = 手动设：[1..2] mm u16LE
+                                                 *   回复帧 0x7E3 魔数 0xB6 */
+#define FLY_CMD_TOF_HEALTH              0x0FU   /* ★ TOF 健康诊断（无参数）
+                                                 *   立即回一帧 0x7E3 魔数 0xB7，
+                                                 *   把「设备号映射 / 应答计数 / 是否有数据 / 当前距离」
+                                                 *   全部倒出来，用来判断激光到底在不在总线上。 */
 
 /* 0x05 语义动作码 */
 #define FLY_ACT_HOOK_UP                 0x01U   /* M5 抓钩抬起 90°（钩住） */
@@ -1012,6 +1129,13 @@ extern volatile uint8_t g_fly_boot_stage;
   * @param  target_mm   目标距离
   * @param  approach    0 = 让距离【减小】到 <= target（箱子靠近传感器）
   *                     1 = 让距离【增大】到 >= target（箱子远离传感器）
+  * @param  speed       增量运动速度（指令单位/s）。
+  *                     传 0 则用默认值 FLY_TOF_CHUNK_SPEED。
+  *                     ★ 精走给小的值（定位准），粗走给大的值（快）。
+  * @param  max_travel_mm  本次调用允许的最大总行程（mm）。
+  *                     ★ 必须认真给：TOF 万一看到的是远处墙面而不是箱子，
+  *                       没有这个上限就会一直往前走直到撞结构。
+  *                     传 0 = 用 FLY_TOF_MAX_TRAVEL_MM（很大，只适合调试）。
   * @param  timeout_ms  总超时
   * @retval FLY_TOF_OK / FLY_TOF_ERR_*
   *
@@ -1019,14 +1143,14 @@ extern volatile uint8_t g_fly_boot_stage;
   * ★ 执行位置：必须在 Task_Flybox（或其它非 CAN 接收任务）里调用。
   */
 uint8_t Fly_BeltFeedToTof(uint8_t slot, uint16_t target_mm, uint8_t approach,
-                          uint32_t timeout_ms);
+                          uint32_t speed, uint16_t max_travel_mm, uint32_t timeout_ms);
 
 /**
   * @brief  ★ 滑台（M3）按 TOF 反馈前后移动，一块一块地走
   *         参数含义同 Fly_BeltFeedToTof
   */
 uint8_t Fly_SlideToTof(uint8_t slot, uint16_t target_mm, uint8_t approach,
-                       uint32_t timeout_ms);
+                       uint32_t speed, uint16_t max_travel_mm, uint32_t timeout_ms);
 
 /* ---- 单轴运动 ---- */
 
@@ -1163,7 +1287,68 @@ extern volatile uint8_t g_fly_flow_which;
 #define FLY_WHY_REFUSED  1U   /* ★ 指令被拒，一帧都没发出去（软限位/限幅/设备号未知）*/
 #define FLY_WHY_TIMEOUT  2U   /* 帧发了，等不到到位确认（超时或堵转）*/
 #define FLY_WHY_SEND     3U   /* 皮带帧发送失败（CAN 发不出去）*/
+#define FLY_WHY_NO_TOF   4U   /* ★ 读不到激光距离，已退回固定距离盲走 */
+#define FLY_WHY_TOF_STALL 5U  /* ★ 激光读数不跟着平台动（测的不是箱子/不是纵向），已退回盲走补齐 */
 extern volatile uint8_t g_fly_flow_why;
+
+/**
+  * @brief  ★ 业务流程实时进度上报（0x7E3，魔数 0xB5）
+  *
+  *         流程运行期间每一步、每个 TOF 增量各发一帧。
+  *         原因：流程是同步执行的，主循环的定期上报会被完全占住，
+  *         不主动发帧的话，动作在动但 CAN 上什么都看不到。
+  *
+  *         字段见 flybox.c 里 Fly_SendFlowReport() 的注释。
+  */
+void Fly_SendFlowReport(void);
+
+/* ---- 抓取距离（拉箱靠近的停止点）----
+ *
+ * ★ 为什么是变量而不是纯宏：
+ *   「钩子刚好能勾住时，TOF 读多少」只能现场定，而且换钩子/换传感器
+ *   安装位置就得重定。做成变量就能用 0x111 [0x0E] 现场学，不用重编。
+ *
+ * ★ 只存 RAM，每次上电回到 FLY_PULL_GRAB_DIST_MM。
+ *   定下来之后把宏改成那个值即可。 */
+extern volatile uint16_t g_fly_grab_dist_mm;
+extern volatile uint8_t  g_fly_learn_req;
+extern volatile uint8_t  g_fly_tofhealth_req;
+
+/**
+  * @brief  ★ 学习抓取距离：把当前 TOF 读数记为「钩子刚好能勾住」的距离
+  *
+  *         使用步骤：
+  *           1) 手动把 M3 点动到「钩子刚好能勾住箱子」的位置
+  *           2) 发 0x111 [0x0E]
+  *           3) 看回复帧 0x7E3 魔数 0xB6 的 [2..3] 确认学到了多少
+  *
+  *         ★ 必须在 Task_Flybox 里执行（要读 TOF，不能在 CAN 接收任务里做）
+  * @retval 0 = 学到并更新，1 = 读不到有效距离（保持原值）
+  */
+uint8_t Fly_LearnGrabDist(void);
+
+/**
+  * @brief  ★ TOF 健康诊断上报（0x7E3，魔数 0xB7，连发 2 帧一组）
+  *
+  *   ★★★ 为什么要专门一帧 ★★★
+  *
+  *     「激光到底在不在总线上」是排查靠近逻辑失效的第一问题，
+  *     而原来的 0x7E1（0xAD）只给距离，距离无效时分不清两种截然不同的原因：
+  *       ① TOF 根本没应答（设备号错 / 没接 / 没配置）
+  *       ② 应答了但读数无效（没对准目标 / 超出量程）
+  *     两者的处理方式完全不同，所以必须把应答计数据供给你看。
+  *
+  *   帧 1（[1] = 0）：槽位 0
+  *   帧 2（[1] = 1）：槽位 1
+  *     [0] 0xB7 魔数
+  *     [1] 槽位号
+  *     [2] 该槽位的物理设备号（car_cfg.h 的 TOF8_DEV0/1）
+  *     [3] 应答计数低 8 位（★ 0 = 这一个槽位从未应答过）
+  *     [4] has_data 标志（1 = 曾收到过有效距离）
+  *     [5] fresh 标志（1 = 最近一帧带新数据）
+  *     [6..7] 当前距离 mm（u16 小端，0xFFFF/9999 = 无效）
+  */
+void Fly_SendTofHealth(void);
 
 /* ---- Watch 变量 ---- */
 extern volatile uint8_t  g_fly_scan_cnt;

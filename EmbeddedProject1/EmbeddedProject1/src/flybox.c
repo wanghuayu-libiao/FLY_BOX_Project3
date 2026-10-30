@@ -130,6 +130,16 @@ volatile uint8_t  g_fly_flow_running = 0U;     /* 0 = 空闲，1 = 拉箱，2 = 
 volatile uint8_t  g_fly_flow_req     = 0U;     /* 1 = 已请求跑流程 */
 volatile uint8_t  g_fly_flow_which   = 0U;     /* 1 = 拉箱，2 = 推箱 */
 volatile uint8_t  g_fly_flow_why     = 0U;     /* 失败原因码，见 FLY_WHY_* */
+
+/* ★ 抓取距离（拉箱靠近的停止点，mm）
+ *
+ *   TOF 只知道「传感器到箱子多少毫米」，不知道钩子在哪。
+ *   「钩尖刚好能勾住」是安装几何决定的，只能量或学。
+ *   做成变量是为了能用 0x111 [0x0E] 现场学，不用重编烧录。
+ *   只存 RAM，上电重置回宏里的默认值。 */
+volatile uint16_t g_fly_grab_dist_mm = FLY_PULL_GRAB_DIST_MM;
+volatile uint8_t  g_fly_learn_req    = 0U;
+volatile uint8_t  g_fly_tofhealth_req = 0U;
 volatile uint8_t  g_fly_tofprobe_req  = 0U;
 volatile uint8_t  g_fly_tofprobe_belt = 0U;
 volatile uint16_t g_fly_tofprobe_step = 0U;
@@ -1413,14 +1423,17 @@ static uint16_t Fly_TofReadOnce(uint8_t slot)
 	return Tof8_ReadDistanceMm(slot, FLY_TOF_READ_TIMEOUT_MS);
 }
 
-/** @brief 走一个增量（皮带用双轴同步，其它用单轴）*/
-static uint8_t Fly_TofStep(FlyAxis_t axis, uint8_t use_belt, int32_t dir)
+/** @brief 走一个增量（皮带用双轴同步，其它用单轴）
+ *  @param  speed 增量速度（指令单位/s），0 = 用默认 FLY_TOF_CHUNK_SPEED */
+static uint8_t Fly_TofStep(FlyAxis_t axis, uint8_t use_belt, int32_t dir, uint32_t speed)
 {
 	int32_t units = dir * (int32_t)FLY_TOF_CHUNK_MM * (int32_t)FLY_UNITS_PER_MM;
 
+	if (speed == 0U) { speed = FLY_TOF_CHUNK_SPEED; }
+
 	if (use_belt != 0U)
 	{
-		if (Fly_BeltMove(units, FLY_TOF_CHUNK_SPEED,
+		if (Fly_BeltMove(units, speed,
 		                 Fly_AxisAccel(FLY_AXIS_BELT_L)) != 0U) { return FLY_TOF_ERR_SEND; }
 		if (Fly_WaitBeltDone(FLY_TOF_STEP_TIMEOUT_MS) == 0U) { return FLY_TOF_ERR_NODONE; }
 	}
@@ -1428,7 +1441,7 @@ static uint8_t Fly_TofStep(FlyAxis_t axis, uint8_t use_belt, int32_t dir)
 	{
 		/* ★ 允许未置零运行：TOF 闭环本身就是定位手段，不依赖软件零点。
 		 *   安全性由 200mm 行程限幅 + 总行程上限 + 卡住检测共同保证。 */
-		if (Fly_MoveRelEx(axis, units, FLY_TOF_CHUNK_SPEED,
+		if (Fly_MoveRelEx(axis, units, speed,
 		                  Fly_AxisAccel(axis), 1U) != 0U) { return FLY_TOF_ERR_SEND; }
 		if (Fly_WaitAxisDone(axis, FLY_TOF_STEP_TIMEOUT_MS) == 0U) { return FLY_TOF_ERR_NODONE; }
 	}
@@ -1438,10 +1451,15 @@ static uint8_t Fly_TofStep(FlyAxis_t axis, uint8_t use_belt, int32_t dir)
 
 /**
   * @brief  TOF 闭环增量运动的公共实现
-  * @param  use_belt  1 = 动皮带（M1+M2 同步），0 = 动单轴
+  * @param  use_belt       1 = 动皮带（M1+M2 同步），0 = 动单轴
+  * @param  speed          增量速度，0 = 用 FLY_TOF_CHUNK_SPEED
+  * @param  max_travel_mm  本次调用允许的最大总行程（0 = 用 FLY_TOF_MAX_TRAVEL_MM）
+  *                        ★ 必须传，因为它才是“撞不到结构”的真正保证
   */
 static uint8_t Fly_TofFeedLoop(FlyAxis_t axis, uint8_t use_belt, uint8_t slot,
-                               uint16_t target_mm, uint8_t approach, uint32_t timeout_ms)
+                               uint16_t target_mm, uint8_t approach,
+                               uint32_t speed, uint16_t max_travel_mm,
+                               uint32_t timeout_ms)
 {
 	uint32_t t0;
 	uint32_t traveled = 0U;
@@ -1453,6 +1471,7 @@ static uint8_t Fly_TofFeedLoop(FlyAxis_t axis, uint8_t use_belt, uint8_t slot,
 	uint8_t  r;
 
 	if (slot >= TOF8_DEV_NUM) { return FLY_TOF_ERR_NO_DATA; }
+	if (max_travel_mm == 0U) { max_travel_mm = (uint16_t)FLY_TOF_MAX_TRAVEL_MM; }
 
 	/* ---- 先拿一次有效读数：拿不到就【不动】----
 	 * ★ 这条很重要：没有 TOF 读数就没有定位手段，
@@ -1470,14 +1489,18 @@ static uint8_t Fly_TofFeedLoop(FlyAxis_t axis, uint8_t use_belt, uint8_t slot,
 	for (;;)
 	{
 		/* ---------------- 1. 走一个增量 ---------------- */
-		r = Fly_TofStep(axis, use_belt, dir);
+		r = Fly_TofStep(axis, use_belt, dir, speed);
 		if (r != FLY_TOF_OK) { return r; }
 
 		traveled += FLY_TOF_CHUNK_MM;
-		if (traveled > FLY_TOF_MAX_TRAVEL_MM) { return FLY_TOF_ERR_TRAVEL; }
+		if (traveled > (uint32_t)max_travel_mm) { return FLY_TOF_ERR_TRAVEL; }
 
 		/* ---------------- 2. 读新的距离 ---------------- */
 		d = Fly_TofReadOnce(slot);
+
+		/* ★ 每个增量发一帧实时进度：CAN 日志里能直接看到
+		 *   「滑台位置在变、距箱距离在变小」的对应关系。 */
+		Fly_SendFlowReport();
 
 		if (d == TOF8_DIST_MM_INVALID)
 		{
@@ -1532,18 +1555,20 @@ static uint8_t Fly_TofFeedLoop(FlyAxis_t axis, uint8_t use_belt, uint8_t slot,
 }
 
 uint8_t Fly_BeltFeedToTof(uint8_t slot, uint16_t target_mm, uint8_t approach,
-                          uint32_t timeout_ms)
+                          uint32_t speed, uint16_t max_travel_mm, uint32_t timeout_ms)
 {
-	uint8_t r = Fly_TofFeedLoop(FLY_AXIS_BELT_L, 1U, slot, target_mm, approach, timeout_ms);
+	uint8_t r = Fly_TofFeedLoop(FLY_AXIS_BELT_L, 1U, slot, target_mm, approach,
+	                            speed, max_travel_mm, timeout_ms);
 
 	g_fly_tof_result = r;
 	return r;
 }
 
 uint8_t Fly_SlideToTof(uint8_t slot, uint16_t target_mm, uint8_t approach,
-                       uint32_t timeout_ms)
+                       uint32_t speed, uint16_t max_travel_mm, uint32_t timeout_ms)
 {
-	uint8_t r = Fly_TofFeedLoop(FLY_AXIS_SLIDE, 0U, slot, target_mm, approach, timeout_ms);
+	uint8_t r = Fly_TofFeedLoop(FLY_AXIS_SLIDE, 0U, slot, target_mm, approach,
+	                            speed, max_travel_mm, timeout_ms);
 
 	g_fly_tof_result = r;
 	return r;
@@ -1680,6 +1705,129 @@ void Fly_SendStateReport(void)
 	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
 }
 
+/**
+  * @brief  ★ 业务流程实时进度（0x7E3，魔数 0xB5，流程运行中每一步发一帧）
+  *
+  *   ★★★ 为什么需要单独一帧 ★★★
+  *
+  *     流程是在 Task_Flybox 的主循环里同步执行的（每步都要等到位），
+  *     所以流程一跑起来，主循环那条「200ms/400ms 定期上报」就完全停了。
+  *     结果就是：动作在动，但 CAN 上一片死寂，完全看不出走到哪一步、
+  *     激光读到多少 —— 这正是排查「流程卡住」最需要的两条信息。
+  *
+  *   所以流程内部在「每步开始」和「每个 TOF 增量」时各发一帧。
+  *
+  *   [0] 0xB5 魔数
+  *   [1] 序号（自增，用于判断有没有丢帧）
+  *   [2] 流程（0 空闲 / 1 拉箱 / 2 推箱）
+  *   [3] 当前步骤号
+  *   [4] 失败原因码（FLY_WHY_*）
+  *   [5..6] 抓钩下方 TOF 距离 mm（0xFFFF = 读数无效）
+  *   [7] M3 滑台的软件位置低 8 位（看它在不在动）
+  */
+void Fly_SendFlowReport(void)
+{
+	static uint8_t seq = 0U;
+	uint8_t  buf[8];
+	uint16_t du = Fly_TofUnderHook();
+
+	buf[0] = 0xB5U;
+	buf[1] = seq++;
+	buf[2] = g_fly_flow_running;
+	buf[3] = g_fly_flow_step;
+	buf[4] = g_fly_flow_why;
+	buf[5] = (uint8_t)(du & 0xFFU);
+	buf[6] = (uint8_t)(du >> 8);
+	buf[7] = (uint8_t)(s_ax[FLY_AXIS_SLIDE].pos & 0xFF);
+
+	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+}
+
+/**
+  * @brief  抓取距离回复帧（0x7E3，魔数 0xB6）
+  *
+  *   [0] 0xB6 魔数
+  *   [1] 结果（0 = 学到了 / 1 = 读不到有效距离，原值没变）
+  *   [2..3] 当前生效的抓取距离 mm（u16 小端）
+  *   [4..5] 学习那一刻的 TOF 原始读数 mm（u16 小端，0xFFFF = 无效）
+  *   [6..7] 保留
+  */
+static void Fly_SendGrabDistReport(uint8_t result, uint16_t raw_mm)
+{
+	uint8_t buf[8];
+
+	buf[0] = 0xB6U;
+	buf[1] = result;
+	buf[2] = (uint8_t)(g_fly_grab_dist_mm & 0xFFU);
+	buf[3] = (uint8_t)(g_fly_grab_dist_mm >> 8);
+	buf[4] = (uint8_t)(raw_mm & 0xFFU);
+	buf[5] = (uint8_t)(raw_mm >> 8);
+	buf[6] = 0U;
+	buf[7] = 0U;
+
+	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+}
+
+uint8_t Fly_LearnGrabDist(void)
+{
+	uint8_t  slot;
+	uint16_t d;
+
+	slot = Tof8_FindSlot(FLY_TOF_USE_FOR_SLIDE);
+	if (slot >= TOF8_DEV_NUM)
+	{
+		Fly_SendGrabDistReport(1U, TOF8_DIST_MM_INVALID);
+		return 1U;
+	}
+
+	d = Tof8_ReadDistanceMm(slot, FLY_TOF_READ_TIMEOUT_MS);
+	if ((d == TOF8_DIST_MM_INVALID) || (d == 0U))
+	{
+		/* ★ 读不到就【不改】原值：宁可留着旧值，
+		 *   也不能把抓取距离写成无效值 —— 那会让整个靠近逻辑失效。 */
+		Fly_SendGrabDistReport(1U, d);
+		return 1U;
+	}
+
+	g_fly_grab_dist_mm = d;
+	Fly_SendGrabDistReport(0U, d);
+	return 0U;
+}
+
+/**
+  * @brief  ★ TOF 健康诊断上报（0x7E3，魔数 0xB7）
+  *
+  *   ★ 一个槽位一帧，按槽位 0..TOF8_DEV_NUM-1 依次发，帧间留 20ms。
+  *     字段含义见 flybox.h 的 Fly_SendTofHealth() 注释。
+  *
+  *   ★ 怎么判读（这是排查「激光为什么不起作用」最直接的手段）：
+  *       应答计数 = 0        -> TOF 根本不在总线上：设备号错 / 没接 / 上电顺序不对
+  *       应答计数 > 0 但无效值 -> 在总线上，但没对准目标（或超出量程）
+  *       两者都有且距离正常 -> 激光可用
+  */
+void Fly_SendTofHealth(void)
+{
+	uint8_t  buf[8];
+	uint8_t  i;
+
+	for (i = 0U; i < TOF8_DEV_NUM; i++)
+	{
+		uint16_t d = Tof8_GetDistanceMm(i);
+
+		buf[0] = 0xB7U;
+		buf[1] = i;
+		buf[2] = Tof8_GetDev(i);
+		buf[3] = (uint8_t)(Tof8_GetRespCount(i) & 0xFFU);
+		buf[4] = Tof8_HasData(i);
+		buf[5] = Tof8_IsFresh(i);
+		buf[6] = (uint8_t)(d & 0xFFU);
+		buf[7] = (uint8_t)(d >> 8);
+
+		(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+		osDelay(20U);
+	}
+}
+
 void Fly_SendPosReport(void)
 {
 	static uint8_t axis = 0U;
@@ -1777,8 +1925,11 @@ void Fly_OnCommand(const uint8_t *data, uint8_t dlc)
 		break;
 
 	case FLY_CMD_STOP:
-		/* 只是从容地不再发新位置；不能靠「发 0 目标」急停（会中途改目标）*/
-		g_fly_abort = 1U;
+		/* 只是从容地不再发新位置；不能靠「发 0 目标」急停（会中途改目标）
+		 * ★ 必须同时清掉流程请求，否则自动循环会继续起下一轮 ——
+		 *   那就变成「按了停止也不停」。 */
+		g_fly_abort     = 1U;
+		g_fly_flow_req  = 0U;
 		break;
 
 	case FLY_CMD_QUERY_POS:
@@ -1884,6 +2035,29 @@ void Fly_OnCommand(const uint8_t *data, uint8_t dlc)
 		if (g_fly_flow_running != 0U) { break; }   /* 正在跑，不打断 */
 		g_fly_flow_which = data[1];
 		g_fly_flow_req   = 1U;
+		break;
+
+	case FLY_CMD_TOF_HEALTH:
+		/* ★ TOF 健康诊断：只置请求，由 Task_Flybox 执行
+		 *   （内部要发多帧并留间隔，不能在 CAN 接收任务里阻塞）。 */
+		g_fly_tofhealth_req = 1U;
+		break;
+
+	case FLY_CMD_GRAB_DIST:
+		/* ★ 抓取距离（拉箱靠近的停止点）
+		 *   DLC <= 1     -> 学习：把当前 TOF 读数记下来
+		 *   DLC >= 3     -> 手动设：[1..2] mm u16 小端
+		 *
+		 * ★ 学习要读 TOF，不能在 CAN 接收任务里做，只置请求。 */
+		if (dlc >= 3U)
+		{
+			uint16_t v = (uint16_t)((uint16_t)data[1] | ((uint16_t)data[2] << 8));
+			if (v > 0U) { g_fly_grab_dist_mm = v; }
+		}
+		else
+		{
+			g_fly_learn_req = 1U;
+		}
 		break;
 
 	default:
@@ -2045,6 +2219,10 @@ static uint8_t Fly_DoStep(uint8_t step_no, FlyAxis_t ax, int32_t units, uint8_t 
 	g_fly_flow_step = step_no;
 	g_fly_flow_why  = FLY_WHY_NONE;
 
+	/* ★ 每步开始就报一帧：流程是同步执行的，主循环的定期上报
+	 *   会被完全占住，不主动发就什么都看不到。 */
+	Fly_SendFlowReport();
+
 	if (units == 0) { return 0U; }
 
 	if (use_belt != 0U)
@@ -2131,6 +2309,7 @@ static uint8_t Fly_DoStepTo(uint8_t step_no, FlyAxis_t ax, int32_t logical_targe
 	{
 		g_fly_flow_step = step_no;
 		g_fly_flow_why  = FLY_WHY_NONE;
+		Fly_SendFlowReport();
 		osDelay(FLY_FLOW_STEP_GAP_MS);
 		return 0U;
 	}
@@ -2145,17 +2324,194 @@ static uint8_t Fly_DoStepTo(uint8_t step_no, FlyAxis_t ax, int32_t logical_targe
 #define FLY_LAND_SLIDE_HOME     0                                /* 完全缩回 */
 #define FLY_LAND_SLIDE_OUT      ((int32_t)FLY_PULL_SLIDE_FWD_UNITS)  /* 前伸到抓取位 */
 #define FLY_LAND_HOOK_DOWN      0                                /* 抓钩垂下 */
-#define FLY_LAND_HOOK_UP        ((int32_t)FLY_HOOK_UP_UNITS)     /* 抓钩抬起钩住 */
+
+/* ★ 拉箱：100°（90° 勾住 + 10° 把箱子抬到皮带承载面）
+ *   箱子在外部货架上，比皮带面低，不多抬这 10° 拖不进通道。 */
+#define FLY_LAND_HOOK_UP        ((int32_t)FLY_HOOK_UP_UNITS)
+
+/* ★ 推箱：仍然 90°。
+ *   推箱时箱子【已经平放在皮带上】，多抬 10° 会把箱子抬离皮带面，
+ *   推到一半再落下来容易卡住皮带边缘。两个流程的抬起高度不同。 */
+#define FLY_LAND_HOOK_UP_PUSH   ((int32_t)(FLY_HOOK_DEG * FLY_HOOK_UNITS_PER_DEG))
+
 #define FLY_LAND_SWING_WORK     0                                /* 工作位（对准皮带通道）*/
 #define FLY_LAND_SWING_PARK     ((int32_t)FLY_SWING_PARK_UNITS)  /* 右转 90° 让位 */
+
+/* =========================================================================
+ *          ★ 拉箱第 2 步：用激光测距靠近箱子（粗走 + 精走）
+ *
+ *  ★ 为什么分两段：
+ *    全程用小步太慢 —— 每 10mm 都要「走 -> 停稳 -> 读数」，
+ *    300mm 要走 30 次，每次差不多 0.3s，一共 9 秒。
+ *    而箱子位置是固定的，先按读到的距离一次走掉大部分，
+ *    剩下的几十毫米再用小步收敛，精度一样是 10mm，但快得多。
+ *
+ *  ★ 为什么粗走要留余量（FLY_PULL_TOF_COARSE_MARGIN_MM）：
+ *    万一读数偏小、或者箱子被挪近了，一次走满就会直接顶到箱子。
+ *    留 3cm 给精走，顶多撞 3cm 的余量，可以接受。
+ *
+ *  ★ 读不到距离 / 读数不跟着动时：
+ *    退回「盲走」，并且【把已经走掉的距离扣掉，把剩下的补齐】。
+ *
+ *  ★★★ 为什么必须补齐（2026-10-30 现场踩到的坑）★★★
+ *
+ *    激光装在抓钩下方，如果它实际朝的不是纵向（或者对着没有箱子的空处），
+ *    那么平台往前走、读数却一动不动。
+ *    卡住检测（FLY_TOF_STALL_STEPS=3）就会在走了 3 x 10mm 之后判定「卡住」并退出。
+ *
+ *    表现就是：平台只前进 3cm 就停，后面的「后退」也只有 3cm ——
+ *    肉眼看就是「动作没变、还是那点距离」。
+ *
+ *    现在改成：不管激光能不能用，平台最终一定走到同一个位置。
+ *      激光能用 -> 停在距箱 FLY_PULL_GRAB_DIST_MM，精度高
+ *      激光不能用 -> 退回盲走 FLY_PULL_SLIDE_FWD_MM，动作仍然完整
+ *    区别只体现在 0x7E3 帧 B5 的 [4] 原因码上。
+ * ========================================================================= */
+static uint8_t Fly_PullApproachBox(void)
+{
+#if (FLY_PULL_USE_TOF == 0)
+	/* 不用激光：退回固定距离盲走 */
+	return Fly_DoStep(2U, FLY_AXIS_SLIDE, (int32_t)FLY_PULL_SLIDE_FWD_UNITS, 0U);
+#else
+	uint8_t  slot;
+	uint16_t d0;
+	int32_t  coarse_mm;
+	int32_t  cap_mm;
+	int32_t  pos_before;
+	int32_t  moved_fwd;         /* 本步已经向前走的逻辑单位数 */
+	int32_t  remain;
+	int32_t  fine_budget;       /* 精走还允许走多少 mm */
+	uint8_t  r;
+
+	g_fly_flow_step = 2U;
+	g_fly_flow_why  = FLY_WHY_NONE;
+
+	pos_before = s_ax[FLY_AXIS_SLIDE].pos;      /* 物理方向记录 */
+
+	/* ---- 找到「滑台定位」用的那一路 TOF ---- */
+	slot = Tof8_FindSlot(FLY_TOF_USE_FOR_SLIDE);
+	if (slot >= TOF8_DEV_NUM)
+	{
+		/* 设备号没配上 -> 用兜底距离 */
+		goto blind;
+	}
+
+	/* ---- 读初始距离 ---- */
+	d0 = Tof8_ReadDistanceMm(slot, FLY_TOF_READ_TIMEOUT_MS);
+	if (d0 == TOF8_DIST_MM_INVALID)
+	{
+		goto blind;
+	}
+
+	/* ---- 已经比目标还近：不用再靠近，直接抬手 ---- */
+	if (d0 <= g_fly_grab_dist_mm)
+	{
+		osDelay(FLY_FLOW_STEP_GAP_MS);
+		return 0U;
+	}
+
+	/* ---- 第一段：粗走，一次走掉大部分行程 ----
+	 * 目标 = 当前距离 - 抓取距离 - 余量
+	 * 上限 = FLY_PULL_TOF_APPROACH_MAX_MM（滑台真实行程的 95%）
+	 * ★ 不再像以前那样写死 300mm —— 那会让远处的箱子永远够不到，
+	 *   而且和盲走兜底的 300mm 撞在一起，根本分不出激光有没有起作用。 */
+	coarse_mm = (int32_t)d0
+	          - (int32_t)g_fly_grab_dist_mm
+	          - (int32_t)FLY_PULL_TOF_COARSE_MARGIN_MM;
+
+	cap_mm = (int32_t)FLY_PULL_TOF_COARSE_MAX_MM;
+	if (coarse_mm > cap_mm) { coarse_mm = cap_mm; }
+	if (coarse_mm < 0)      { coarse_mm = 0; }
+
+	/* 精走的预算 = 总接近上限 - 粗走已用
+	 * ★ 这是为了让「箱子比粗走限幅更远」时精走还能继续往前走，
+	 *   而不是像以前那样卡在 110mm 就停。 */
+	fine_budget = (int32_t)FLY_PULL_TOF_APPROACH_MAX_MM - coarse_mm;
+	if (fine_budget < 0) { fine_budget = 0; }
+
+	if (coarse_mm > 0)
+	{
+		if (Fly_DoStep(2U, FLY_AXIS_SLIDE,
+		               coarse_mm * (int32_t)FLY_UNITS_PER_MM, 0U) != 0U)
+		{
+			/* 粗走被拒（超行程限幅等）-> 至少把精走跑完 */
+			g_fly_flow_why = FLY_WHY_REFUSED;
+		}
+	}
+
+	/* ---- 第二段：精走，10mm 小步收到目标距离 ----
+	 * ★ max_travel 只给「粗走剩下的余量 + 一点富余」，
+	 *   绝不允许它自己再走几百毫米 —— 那说明 TOF 看的不是箱子。 */
+	r = Fly_SlideToTof(slot,
+	                   g_fly_grab_dist_mm,
+	                   0U,                          /* 让距离减小 */
+	                   FLY_APPROACH_SPEED,
+	                   (uint16_t)fine_budget,
+	                   FLY_PULL_TOF_TIMEOUT_MS);
+
+	if (r == FLY_TOF_OK)
+	{
+		return 0U;
+	}
+
+	/* =====================================================================
+	 *  ★★★ 激光这条路没走通 -> 退回盲走，把剩余距离补齐 ★★★
+	 *
+	 *  先算出「本步已经向前走了多少」（逻辑方向，向前为正），
+	 *  再用盲走把 FLY_PULL_SLIDE_FWD_UNITS - 已走 补上。
+	 *
+	 *  ★ 为什么用 pos 差值而不是「走了几步 x 10mm」：
+	 *    pos 是每次真实下发都会累加的物理量，粗走、精走、被拒的帧
+	 *    全都会如实反映，不会漏算也不会重复算。
+	 * ===================================================================== */
+
+	/* pos 是物理方向，乘以符号换回「逻辑向前」的正数 */
+	moved_fwd = (s_ax[FLY_AXIS_SLIDE].pos - pos_before)
+	          * (int32_t)FLY_DIR_SIGN_OF(FLY_AXIS_SLIDE);
+
+	remain = (int32_t)FLY_PULL_SLIDE_FWD_UNITS - moved_fwd;
+
+	/* 记下是哪种失败，用户能在 0x7E3 帧 B5 的 [4] 看到 */
+	g_fly_flow_why = (r == FLY_TOF_ERR_STALL) ? FLY_WHY_TOF_STALL : FLY_WHY_NO_TOF;
+
+	if (remain > 0)
+	{
+		/* 补齐剩余行程。★ 超过单次限幅就分两次走。 */
+		while (remain > 0)
+		{
+			int32_t chunk = remain;
+			int32_t lim   = (int32_t)FLY_JOG_MAX_MM * (int32_t)FLY_UNITS_PER_MM;
+
+			if (chunk > lim) { chunk = lim; }
+
+			if (Fly_DoStep(2U, FLY_AXIS_SLIDE, chunk, 0U) != 0U)
+			{
+				break;              /* 补齐也失败就认了，别死循环 */
+			}
+			remain -= chunk;
+		}
+	}
+
+	/* ★ 补齐完成：动作是完整的，返回值按成功处理。
+	 *   原因码留在 g_fly_flow_why 里供诊断，不阻断流程。 */
+	return 0U;
+
+blind:
+	/* ---- 兜底：按以前的固定距离盲走 ---- */
+	g_fly_flow_why = FLY_WHY_NO_TOF;
+	return Fly_DoStep(2U, FLY_AXIS_SLIDE, (int32_t)FLY_PULL_SLIDE_FWD_UNITS, 0U);
+#endif
+}
 
 /* =========================================================================
  *                      ★ 拉箱流程（7 步，对应流程图）
  *
  *  1. 平台从让位转回 0° 工作位
- *  2. 平台前伸到抓取位（★ 以后接 TOF 换掉这一步的固定距离）
- *  3. 抓钩抬 90° 钩住箱子
- *  4. 平台后退，把箱子拖到皮带上方
+ *  2. 平台前伸到抓取位
+ *     ★ 用激光测距：距离箱子 FLY_PULL_GRAB_DIST_MM（7cm）就停
+ *  3. 抓钩抬 FLY_HOOK_GRAB_DEG（100°= 90° 勾住 + 10° 抬到皮带面）
+ *     ★ 多抬的 10° 是为了把箱子抬到与皮带承载面齐平，否则拖不进去
+ *  4. 平台后退，把箱子【抬着】移到皮带上方
  *  5. 抓钩放回 0°，箱子落在两条皮带上
  *  6. 平台右转 90°，腾出皮带通道
  *  7. M1+M2 同步把箱子输送到位
@@ -2173,11 +2529,13 @@ uint8_t Fly_RunPullOnce(void)
 	r = Fly_DoStepTo(1U, FLY_AXIS_SWING, FLY_LAND_SWING_WORK);
 	if (r != 0U) { goto pull_fail; }
 
-	/* ---- 2. 前伸到抓取位 ---- */
-	r = Fly_DoStepTo(2U, FLY_AXIS_SLIDE, FLY_LAND_SLIDE_OUT);
+	/* ---- 2. 前伸到抓取位（★ 激光测距靠近，到 7cm 就停）---- */
+	r = Fly_PullApproachBox();
 	if (r != 0U) { goto pull_fail; }
 
-	/* ---- 3. 抓钩抬起，钩住箱子 ---- */
+	/* ---- 3. 抓钩抬起 100°：勾住箱子 + 抬到皮带承载面 ----
+	 * ★ 90° 只是勾住，箱子还比皮带面低一点；多抬 10° 才抬得上去。
+	 *   见 flybox.h 的 FLY_HOOK_LIFT_EXTRA_DEG。 */
 	r = Fly_DoStepTo(3U, FLY_AXIS_HOOK, FLY_LAND_HOOK_UP);
 	if (r != 0U) { goto pull_fail; }
 
@@ -2237,8 +2595,11 @@ uint8_t Fly_RunPushOnce(void)
 	r = Fly_DoStepTo(2U, FLY_AXIS_SWING, FLY_LAND_SWING_WORK);
 	if (r != 0U) { goto push_fail; }
 
-	/* ---- 3. 抓钩抬起，钩住箱子 ---- */
-	r = Fly_DoStepTo(3U, FLY_AXIS_HOOK, FLY_LAND_HOOK_UP);
+	/* ---- 3. 抓钩抬起 90° 钩住箱子 ----
+	 * ★ 这里【故意】只抬 90°，不跟拉箱一样抬 100°：
+	 *   推箱时箱子已经平放在皮带上，多抬 10° 会把它抬离皮带面，
+	 *   推到一半再落下来容易卡住皮带边缘。 */
+	r = Fly_DoStepTo(3U, FLY_AXIS_HOOK, FLY_LAND_HOOK_UP_PUSH);
 	if (r != 0U) { goto push_fail; }
 
 	/* ---- 4. 平台前伸，把箱子推出去 ---- */
