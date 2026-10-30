@@ -30,4 +30,14 @@ uint8_t Can_SendStd(uint16_t id, const uint8_t *data, uint8_t dlc);
 uint8_t Can_RxPop(CanFrame_t *frame);
 void Can_SetRxCallback(void (*callback)(void));
 
+/* ★ 诊断接口（供 flybox 的系统健康帧使用）
+ *   hcan 在 can.c 里是 static，外部拿不到，所以开两个只读接口。 */
+
+/** @brief 取 CAN 错误状态寄存器 ESR 原值
+  *        bit4 = 总线关闭标志，bit16..23 = TEC，bit24..31 = REC */
+uint32_t Can_GetEsr(void);
+
+/** @brief 取「邮箱全满时丢弃旧帧」的累计次数（在涨 = 总线拥堵/无应答）*/
+uint32_t Can_GetTxFlushCount(void);
+
 #endif /* __CAN_H */

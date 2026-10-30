@@ -713,6 +713,7 @@ static void Task_Flybox(void const *argument)
 {
 	uint8_t  div_state = 0U;
 	uint8_t  div_pos   = 0U;
+	uint8_t  div_health = 0U;
 	uint32_t wake;
 
 	(void)argument;
@@ -954,6 +955,15 @@ static void Task_Flybox(void const *argument)
 			Fly_SendTofReport();
 		}
 
+		/* ★ 每 1s 上报系统健康（0x7E3 魔数 0xBA / 0xBB）
+		 *   堆余量 / 栈水位 / CAN 错误计数 ——
+		 *   这是区分「MCU 死了」「堆炸了」「总线挂了」「电机堵了」的关键。 */
+		if (++div_health >= 20U)
+		{
+			div_health = 0U;
+			Fly_SendHealthReport();
+		}
+
 		/* ---- 皮带同步点动（0x111 [0x0C, 方向, 距离L, 距离H]）----
 		 * ★ 验证「两条皮带能不能一起动」。和逐轴点动不同，
 		 *   这里两帧位置指令紧挨着发，中间不留延时。 */
@@ -996,6 +1006,80 @@ static void OnCanRx(void)
 	if (TaskCanRxHandle != NULL)
 	{
 		(void)osSignalSet(TaskCanRxHandle, SIG_CAN_RX);
+	}
+}
+
+/* =========================================================================
+ *          ★★★ 死机取证钩子（2026-10-30 新增）★★★
+ *
+ *  ★ 为什么必须加：
+ *    现场出现「往回走到一半整个系统不动了」，但 CAN 上什么都看不到 ——
+ *    因为原来 configCHECK_FOR_STACK_OVERFLOW = 0，栈溢出是完全隐形的。
+ *    溢出的任务会踩坏相邻任务的数据，最终表现就是「跑到某步突然全停」，
+ *    而且怎么查代码都查不出来。
+ *
+ *  ★ 现在两个钩子都会：
+ *      1) 发一帧 0x7EF（魔数 0xEE），把「是谁挂了 / 还剩多少栈」发到总线上
+ *      2) 停在那里死循环，不再破坏其它数据
+ *
+ *  ★ 判读：看到 0x7EF 就是【MCU 侧问题】；
+ *         看不到 0x7EF 但动作也停了，那是【电机侧问题】（堵转/保护）。
+ *    这一条就能把「软件死机」和「机械卡死」区分开，不用再猜。
+ * ========================================================================= */
+
+/**
+  * @brief  死机上报：0x7EF [0xEE, 原因, 任务名前6字节]
+  * @param  why  1 = 栈溢出，2 = 堆分配失败
+  * @note   钩子是在异常上下文里跑的，这里只做「发一帧 + 死循环」，
+  *         不调用任何 FreeRTOS API，避免二次崩溃。
+  */
+static void PanicReport(uint8_t why, const char *name)
+{
+	uint8_t buf[8];
+	uint8_t i;
+
+	buf[0] = 0xEEU;
+	buf[1] = why;
+
+	for (i = 0U; i < 6U; i++)
+	{
+		buf[2U + i] = (name != NULL) ? (uint8_t)name[i] : 0U;
+		if ((name != NULL) && (name[i] == '\0')) { break; }
+	}
+
+	(void)Can_SendStd(0x7EFU, buf, 8U);
+}
+
+/**
+  * @brief  FreeRTOS 栈溢出钩子（configCHECK_FOR_STACK_OVERFLOW = 2 时会被调用）
+  * @param  xTask       溢出的任务句柄
+  * @param  pcTaskName  任务名
+  * @note   正常运行时【绝不会】进这里。一旦进来，说明某个任务栈给小了。
+  */
+void vApplicationStackOverflowHook(void *xTask, char *pcTaskName)
+{
+	(void)xTask;
+
+	PanicReport(1U, pcTaskName);
+
+	/* 死在这里：让 0x7FE 心跳消失，从外部也能看出 MCU 挂了 */
+	for (;;)
+	{
+		/* 空转，不喂任何东西 */
+	}
+}
+
+/**
+  * @brief  FreeRTOS 堆分配失败钩子（configUSE_MALLOC_FAILED_HOOK = 1）
+  * @note   任务/队列创建时堆不够会进这里。
+  *         典型症状：某个任务根本没跑起来，但编译一切正常。
+  */
+void vApplicationMallocFailedHook(void)
+{
+	PanicReport(2U, NULL);
+
+	for (;;)
+	{
 	}
 }
 

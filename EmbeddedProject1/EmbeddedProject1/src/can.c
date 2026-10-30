@@ -200,6 +200,30 @@ uint8_t Can_SendStd(uint16_t id, const uint8_t *data, uint8_t dlc)
 }
 
 /**
+  * @brief  ★ 取 CAN 错误状态寄存器 ESR 原值（供系统健康诊断帧 0xBB 使用）
+  *
+  *   ESR 位定义（参考手册）：
+  *     bit4      EWGF  总线关闭（bus-off）标志
+  *     bit16..23 TEC   发送错误计数（★ 到 255 就进 bus-off）
+  *     bit24..31 REC   接收错误计数
+  *
+  *   ★ 为什么要暴露它：
+  *     现场「跑到一半全停」有一种原因是 CAN 总线进了 bus-off，
+  *     这时 STM32 的帧全部发不出去，看起来就像「程序死了」。
+  *     有了 TEC/REC 就能一眼分清是软件问题还是总线问题。
+  */
+uint32_t Can_GetEsr(void)
+{
+	return hcan.Instance->ESR;
+}
+
+/** @brief 取「邮箱全满时丢弃旧帧」的累计次数 */
+uint32_t Can_GetTxFlushCount(void)
+{
+	return g_can_tx_flush;
+}
+
+/**
   * @brief  从接收队列取出一帧（在任务里调用）
   * @retval 1 取到一帧，0 队列为空
   */

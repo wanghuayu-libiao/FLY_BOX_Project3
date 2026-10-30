@@ -26,12 +26,17 @@
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f1xx_hal.h"
 #include "cmsis_os.h"
+#include "task.h"                      /* ★ xPortGetFreeHeapSize / uxTaskGetStackHighWaterMark */
 #include "can.h"
 #include "protocol.h"
 #include "car_cfg.h"
 #include "motor.h"
 #include "tof8.h"                       /* 飞箱的定位靠 TOF 距离反馈，不靠电机位置 */
 #include "flybox.h"
+
+/* ★ 系统健康诊断要读 CAN 错误状态（ESR）和邮箱丢弃计数。
+ *   hcan 在 can.c 里是 static，所以通过 can.h 的两个只读接口拿 ——
+ *   不要直接 extern hcan（那是 static，链接会报 undefined reference）。 */
 
 /* =========================================================================
  *                              静态配置
@@ -130,6 +135,10 @@ volatile uint8_t  g_fly_flow_running = 0U;     /* 0 = 空闲，1 = 拉箱，2 = 
 volatile uint8_t  g_fly_flow_req     = 0U;     /* 1 = 已请求跑流程 */
 volatile uint8_t  g_fly_flow_which   = 0U;     /* 1 = 拉箱，2 = 推箱 */
 volatile uint8_t  g_fly_flow_why     = 0U;     /* 失败原因码，见 FLY_WHY_* */
+
+/* ★ 堵转/未到位标志：某一步没能确认到位就置 1，由 0xB5 帧 [7] bit1 上报。
+ *   目的是把「机械卡死」和「MCU 死机」区分开 —— 见 Fly_DoStep 里的说明。 */
+volatile uint8_t  g_fly_flow_stall   = 0U;
 
 /* ★ 抓取距离（拉箱靠近的停止点，mm）
  *
@@ -1741,7 +1750,27 @@ void Fly_SendFlowReport(void)
 	buf[4] = g_fly_flow_why;
 	buf[5] = (uint8_t)(du & 0xFFU);
 	buf[6] = (uint8_t)(du >> 8);
-	buf[7] = (uint8_t)(s_ax[FLY_AXIS_SLIDE].pos & 0xFF);
+
+	/* [7] 标志位（★ 2026-10-30 改：原来是滑台 pos 低字节，没用）
+	 *   bit0 = 滑台仍有剩余位移（电机还在动 / 没走完）
+	 *   bit1 = 本步没能确认到位（★ 堵转嫌疑，连着几步都置 1 就是卡死了）
+	 *   bit2 = 已置 abort
+	 *
+	 * ★ 怎么用这一字节：
+	 *     bit1 一直是 1、且 bit0 也一直是 1  ->  电机在“想走但走不动” = 机械卡死
+	 *     bit1 = 0（全 0）但动作停了        ->  软件认为到位了，那就要看电机侧
+	 *     如果连 0xB5 都不再刷新               ->  MCU 死了，看 0x7EF */
+	{
+		uint8_t fl = 0U;
+		int32_t rem = Motor_GetRemainDev(s_ax[FLY_AXIS_SLIDE].dev);
+
+		if ((rem > (int32_t)FLY_REMAIN_EPS_UNITS) ||
+		    (rem < -(int32_t)FLY_REMAIN_EPS_UNITS)) { fl |= 0x01U; }
+		if (g_fly_flow_stall != 0U)                { fl |= 0x02U; }
+		if (g_fly_abort != 0U)                     { fl |= 0x04U; }
+
+		buf[7] = fl;
+	}
 
 	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
 }
@@ -1795,6 +1824,94 @@ uint8_t Fly_LearnGrabDist(void)
 	g_fly_grab_dist_mm = d;
 	Fly_SendGrabDistReport(0U, d);
 	return 0U;
+}
+
+/**
+  * @brief  ★★★ 系统健康诊断（0x7E3，魔数 0xBA / 0xBB，每 1s 一组）★★★
+  *
+  *  ★ 为什么要这一帧：
+  *    「跑到一半整个系统不动了」有四种完全不同的原因，以前无法区分：
+  *      ① MCU 死了（HardFault / 栈溢出）  -> 不再发任何帧
+  *      ② 内存不够（堆耗尽）              -> 任务创建失败 / 分配失败
+  *      ③ CAN 总线异常（bus-off / 错误累积）-> 帧发不出去
+  *      ④ 电机堵转保护                    -> 帧正常发，电机不动
+  *    这一帧把 ②③ 的数字直接倒出来，配合 0x7FE 心跳和 0x7EF 死机帧，
+  *    四种原因就都能分开。
+  *
+  *  帧 1（0xBA）：内存与栈
+  *    [1..2] 当前剩余堆字节 u16LE（总 15360）
+  *    [3..4] 历史最小剩余堆 u16LE（★ 应 >= 1000，否则随时会炸）
+  *    [5]    Task_Flybox 栈高水位（字，低字节）
+  *           ★ = 768 表示一字节没用过；= 100 表示只剩 400B，低于 150 危险
+  *    [6..7] 保留
+  *
+  *  帧 2（0xBB）：CAN 总线
+  *    [1..2] g_fly_tx_fail  u16LE
+  *    [3..4] g_can_tx_flush u16LE（★ 在涨 = 总线拥堵/无应答）
+  *    [5]    CAN 状态 0 正常 / 1 error passive / 2 bus off
+  *    [6]    TEC 发送错误计数（★ > 96 警告，到 255 就 bus off）
+  *    [7]    REC 接收错误计数
+  */
+void Fly_SendHealthReport(void)
+{
+	static uint8_t page = 0U;
+	uint8_t  buf[8];
+	uint32_t esr;
+	uint32_t flushCnt;
+	uint8_t  st;
+
+	if (page == 0U)
+	{
+		uint32_t freeHeap = (uint32_t)xPortGetFreeHeapSize();
+		uint32_t minHeap  = (uint32_t)xPortGetMinimumEverFreeHeapSize();
+
+		/* ★ 用「当前任务」句柄：本函数就是在 Task_Flybox 里调的，
+		 *   省掉一个外部句柄依赖（main.c 的 static 变量拿不到）。 */
+		uint16_t hwm = (uint16_t)uxTaskGetStackHighWaterMark(NULL);
+
+		buf[0] = 0xBAU;
+		buf[1] = (uint8_t)(freeHeap & 0xFFU);
+		buf[2] = (uint8_t)((freeHeap >> 8) & 0xFFU);
+		buf[3] = (uint8_t)(minHeap & 0xFFU);
+		buf[4] = (uint8_t)((minHeap >> 8) & 0xFFU);
+		buf[5] = (uint8_t)(hwm & 0xFFU);
+		buf[6] = 0U;
+		buf[7] = 0U;
+
+		(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+		page = 1U;
+		return;
+	}
+
+	/* ---- 帧 2：CAN 总线 ---- */
+	esr      = Can_GetEsr();
+	flushCnt = Can_GetTxFlushCount();
+	st  = (uint8_t)((esr >> 4) & 0x01U);          /* ESRS: 1 = 总线关闭 */
+	if (st != 0U)
+	{
+		st = 2U;
+	}
+	else if (((esr >> 16) & 0xFFU) >= 0x80U)      /* TEC >= 128 = error passive */
+	{
+		st = 1U;
+	}
+	else
+	{
+		st = 0U;
+	}
+
+	buf[0] = 0xBBU;
+	buf[1] = (uint8_t)(g_fly_tx_fail & 0xFFU);
+	buf[2] = (uint8_t)((g_fly_tx_fail >> 8) & 0xFFU);
+	buf[3] = (uint8_t)(flushCnt & 0xFFU);
+	buf[4] = (uint8_t)((flushCnt >> 8) & 0xFFU);
+	buf[5] = st;
+	buf[6] = (uint8_t)((esr >> 16) & 0xFFU);      /* TEC */
+	buf[7] = (uint8_t)((esr >> 24) & 0xFFU);      /* REC */
+
+	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+
+	page = 0U;
 }
 
 /**
@@ -2299,6 +2416,19 @@ static uint8_t Fly_DoStep(uint8_t step_no, FlyAxis_t ax, int32_t units, uint8_t 
 		g_fly_flow_why = FLY_WHY_TIMEOUT;
 	}
 
+	/* ★★★ 堵转/未到位取证（2026-10-30 新增）★★★
+	 *
+	 *   现场故障：往回走到一半整个系统不动了。
+	 *   要区分两种可能：
+	 *     ① 电机卡住（机械卡死 / 箱子卡在皮带边缘）-> 剩余位移永远不归零
+	 *     ② MCU 死了（栈溢出/HardFault）-> CAN 上什么都不再发
+	 *
+	 *   这里记录「这一步有没有确认到位」，由 0xB5 帧的 [7] 位 1 上报：
+	 *     [7] bit1 = 1  ->  这一步没能确认到位（堵转嫌疑）
+	 *     连着几步 bit1 都是 1，就基本可以断定是机械卡死。
+	 */
+	if (ok == 0U) { g_fly_flow_stall = 1U; }
+
 	/* 停稳留一点时间再下一步（无论如何都要留，机械本身停下需要时间）*/
 	osDelay(FLY_FLOW_STEP_GAP_MS);
 
@@ -2593,6 +2723,7 @@ uint8_t Fly_RunPullOnce(void)
 	g_fly_flow_running = FLY_FLOW_PULL;
 	g_fly_flow_result  = 0U;
 	g_fly_flow_why     = 0U;
+	g_fly_flow_stall   = 0U;        /* 每轮重新计堵转 */
 	g_fly_abort        = 0U;
 
 	/* ---- 1. 转回工作位 ---- */
@@ -2655,6 +2786,7 @@ uint8_t Fly_RunPushOnce(void)
 	g_fly_flow_running = FLY_FLOW_PUSH;
 	g_fly_flow_result  = 0U;
 	g_fly_flow_why     = 0U;
+	g_fly_flow_stall   = 0U;        /* 每轮重新计堵转 */
 	g_fly_abort        = 0U;
 
 	/* ---- 1. 两皮带前移让出转向空间 ---- */

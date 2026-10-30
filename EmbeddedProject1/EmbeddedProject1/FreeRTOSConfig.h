@@ -104,9 +104,24 @@
 #define configIDLE_SHOULD_YIELD			1
 #define configUSE_MUTEXES			1
 #define configQUEUE_REGISTRY_SIZE		8
-#define configCHECK_FOR_STACK_OVERFLOW	        0
+/* ★★★ 2026-10-30：从 0 改成 2 ★★★
+ *
+ *   原来是 0（完全关闭），所以「任务栈溢出」这件事在固件里是【隐形】的：
+ *   溢出的任务会踩坏别的任务的数据，表现是「跑到某一步整个系统突然不动」，
+ *   而 CAN 上看不到任何线索 —— 这正是排查当前故障最难的地方。
+ *
+ *   2 = 最严格：每次任务切换都检查栈指针是否越界 + 填充字是否被破坏。
+ *   代价：每次切换多几十条指令（1kHz tick 下约 1~2% CPU），可接受。
+ *
+ *   一旦检测到溢出，会调用 main.c 里的 vApplicationStackOverflowHook()。 */
+#define configCHECK_FOR_STACK_OVERFLOW	        2
+
+/* ★ 打开堆分配失败钩子：任务创建/队列创建失败时能抓到。
+ *   本工程 configTOTAL_HEAP_SIZE = 15KB，而 Task_Flybox 栈 768 字(3KB)，
+ *   加上其它任务已经用到 6KB 以上 —— 堆不够时 osThreadCreate 会返回 NULL，
+ *   任务根本不会跑，现象和「固件没烧进去」一模一样。 */
+#define configUSE_MALLOC_FAILED_HOOK	        1
 #define configUSE_RECURSIVE_MUTEXES		1
-#define configUSE_MALLOC_FAILED_HOOK	        0
 #define configUSE_APPLICATION_TASK_TAG	        0
 #define configUSE_COUNTING_SEMAPHORES	        1
 #define configGENERATE_RUN_TIME_STATS	        0
@@ -131,6 +146,10 @@ to exclude the API function. */
 #define INCLUDE_vTaskDelayUntil			1
 #define INCLUDE_vTaskDelay			1
 #define INCLUDE_xTaskGetSchedulerState          1
+/* ★ 开启栈高水位查询：系统健康诊断帧（0xBA）用它上报
+ *   Task_Flybox 还剩多少栈，这是判断「栈会不会溢出」的唯一实测依据。
+ *   默认 0（不编译），所以我们手上有 768 字的栈却一直不知道用了多少。 */
+#define INCLUDE_uxTaskGetStackHighWaterMark      1
 
 /* Cortex-M specific definitions. */
 #ifdef __NVIC_PRIO_BITS

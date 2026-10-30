@@ -396,17 +396,30 @@ typedef enum
  * ========================================================================= */
 
 /* ---- 各步的物理位移量 ---- */
-/* ★★★ 2026-10-30 第三次修正：380 -> 600 ★★★
+/* ★★★ 2026-10-30 第五次修正：500 -> 520 ★★★
  *
- *   现场实测：380mm 还不够，箱子在更远处（用户给出 600mm）。
+ *   500mm 时差约 2cm（还差一点才够到），所以 +20mm。
  *
- *   ★ 这意味着滑台的物理行程至少要 600mm，
- *     而 FLY_SLIDE_TRAVEL_MM 现在写的是 400mm（估计值）。
- *     两者不一致会让软限位算错，所以下面两个一起改。
+ *  ★★★ 必须正视一个问题：这个值已经改了 4 次 ★★★
+ *      300 -> 380 -> 600 -> 500 -> 520
  *
- *   ★ 600mm 已经超过 FLY_JOG_MAX_MM(400) 的单次限幅，
- *     所以代码里会自动拆成两段走（已经有分组逻辑）。 */
-#define FLY_PULL_SLIDE_FWD_MM           600.0f  /* 平台前伸到抓取位 */
+ *    每次都是「差一点 / 过头一点」，这说明：
+ *      ① 盲走这条路本身就不可能调准 —— 箱子每挪一次位置，正确值就变；
+ *      ② 更糟的是【过头就会把箱子推走】，箱子位置被永久改变，
+ *         于是下一次的「正确距离」又不一样了 —— 越调越乱；
+ *      ③ 现场测量本身有 ±2~3cm 的误差（用眼看钩尖对不对得上），
+ *         所以「差 2cm」这个数本身也不够准。
+ *
+ *   结论：520 只是当前这一下的值，不是解。
+ *   ★ 真正的解只有一条：让激光测距工作起来（见 FLY_PULL_USE_TOF）。
+ *     激光能让它每次自己停在距箱 FLY_PULL_GRAB_DIST_MM 处，
+ *     跟箱子摆在哪、摆了几次都无关。
+ *
+ *   ★ 现场可调（不用重编烧录）：0x111 [0x11, lo, hi]
+ *      520mm = 0x0208 -> 0x111 11 08 02
+ *     回复 0x7E3 魔数 0xB8，[2..3] 是当前生效值
+ */
+#define FLY_PULL_SLIDE_FWD_MM           520.0f  /* 平台前伸（当前现场值）*/
 #define FLY_PULL_SLIDE_BACK_MM          FLY_PULL_SLIDE_FWD_MM   /* 拖回同样距离 */
 #define FLY_HOOK_DEG                    90.0f   /* 抓钩抬起 / 放回 90° */
 #define FLY_SWING_DEG                   90.0f   /* 平台右转让位 / 转回 90° */
@@ -1324,6 +1337,10 @@ extern volatile uint8_t g_fly_flow_which;
 #define FLY_WHY_TOF_STALL 5U  /* ★ 激光读数不跟着平台动（测的不是箱子/不是纵向），已退回盲走补齐 */
 extern volatile uint8_t g_fly_flow_why;
 
+/* 堵转/未到位标志（0xB5 帧 [7] bit1）
+ *   ★ 用来区分「机械卡死」和「MCU 死机」 */
+extern volatile uint8_t g_fly_flow_stall;
+
 /**
   * @brief  ★ 业务流程实时进度上报（0x7E3，魔数 0xB5）
   *
@@ -1396,6 +1413,22 @@ void Fly_SendTofHealth(void);
   *   [2..3] 拉箱前伸距离 mm    [4..5] 抓取距离 mm
   */
 void Fly_SendPullFwdReport(void);
+
+/**
+  * @brief  ★ 系统健康诊断（0x7E3，魔数 0xBA / 0xBB，每次调用轮换一帧）
+  *
+  *   ★ 用来区分四种「全停」的原因：
+  *       堆耗尽 / 栈不够 / CAN 总线异常 / 电机堵转
+  *
+  *   帧 0xBA： [1..2] 当前剩余堆  [3..4] 历史最小剩余堆
+  *             [5] 当前任务栈高水位（字）
+  *   帧 0xBB： [1..2] tx_fail      [3..4] tx_flush
+  *             [5] CAN 状态(0正常/1 passive/2 busoff)
+  *             [6] TEC  [7] REC
+  *
+  *   ★ 必须在 Task_Flybox 里调用（用当前任务句柄算栈水位）。
+  */
+void Fly_SendHealthReport(void);
 
 /* ---- Watch 变量 ---- */
 extern volatile uint8_t  g_fly_scan_cnt;
