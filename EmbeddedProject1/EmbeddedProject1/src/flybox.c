@@ -140,6 +140,9 @@ volatile uint8_t  g_fly_flow_why     = 0U;     /* 失败原因码，见 FLY_WHY_
 volatile uint16_t g_fly_grab_dist_mm = FLY_PULL_GRAB_DIST_MM;
 volatile uint8_t  g_fly_learn_req    = 0U;
 volatile uint8_t  g_fly_tofhealth_req = 0U;
+
+/* ★ 拉箱前伸距离（mm）—— 现场可调，不靠重编烧录 */
+volatile uint16_t g_fly_pull_fwd_mm  = (uint16_t)FLY_PULL_SLIDE_FWD_MM;
 volatile uint8_t  g_fly_tofprobe_req  = 0U;
 volatile uint8_t  g_fly_tofprobe_belt = 0U;
 volatile uint16_t g_fly_tofprobe_step = 0U;
@@ -1828,6 +1831,31 @@ void Fly_SendTofHealth(void)
 	}
 }
 
+/**
+  * @brief  前伸距离回复帧（0x7E3，魔数 0xB8）
+  *
+  *   [0] 0xB8 魔数
+  *   [1] 保留
+  *   [2..3] 当前生效的拉箱前伸距离 mm（u16 小端）
+  *   [4..5] 当前生效的抓取距离 mm（u16 小端）
+  *   [6..7] 保留
+  */
+void Fly_SendPullFwdReport(void)
+{
+	uint8_t buf[8];
+
+	buf[0] = 0xB8U;
+	buf[1] = 0U;
+	buf[2] = (uint8_t)(g_fly_pull_fwd_mm & 0xFFU);
+	buf[3] = (uint8_t)(g_fly_pull_fwd_mm >> 8);
+	buf[4] = (uint8_t)(g_fly_grab_dist_mm & 0xFFU);
+	buf[5] = (uint8_t)(g_fly_grab_dist_mm >> 8);
+	buf[6] = 0U;
+	buf[7] = 0U;
+
+	(void)Can_SendStd(FLY_ID_STATE_REPORT, buf, 8U);
+}
+
 void Fly_SendPosReport(void)
 {
 	static uint8_t axis = 0U;
@@ -2041,6 +2069,19 @@ void Fly_OnCommand(const uint8_t *data, uint8_t dlc)
 		/* ★ TOF 健康诊断：只置请求，由 Task_Flybox 执行
 		 *   （内部要发多帧并留间隔，不能在 CAN 接收任务里阻塞）。 */
 		g_fly_tofhealth_req = 1U;
+		break;
+
+	case FLY_CMD_PULL_FWD:
+		/* ★ 拉箱前伸距离当场改：[1..2] mm u16LE
+		 *
+		 *   这是「不用重编烧录也能调距离」的入口。
+		 *   激光靠不住时直接用它把前伸定死。 */
+		if (dlc >= 3U)
+		{
+			uint16_t v = (uint16_t)((uint16_t)data[1] | ((uint16_t)data[2] << 8));
+			if ((v > 0U) && (v <= 1000U)) { g_fly_pull_fwd_mm = v; }
+			Fly_SendPullFwdReport();
+		}
 		break;
 
 	case FLY_CMD_GRAB_DIST:
@@ -2403,11 +2444,27 @@ static uint8_t Fly_PullApproachBox(void)
 		goto blind;
 	}
 
-	/* ---- 已经比目标还近：不用再靠近，直接抬手 ---- */
+	/* ---- ★ 读数合理性检查（2026-10-30 修掉一个致命 bug）----
+	 *
+	 *  原来写的是：
+	 *      if (d0 <= g_fly_grab_dist_mm) { return 0U; }    一步不动直接抬手
+	 *
+	 *  这条在「TOF 测到的不是箱子」时是灾难：
+	 *    测到地面 / 侧壁 / 钩子自己 -> 读数很小 -> 马上返回 -> 平台一步没走
+	 *    -> 抓钩抬起时抳到的空气 -> 就是现场看到的「虚空拉箱」。
+	 *
+	 *  改成：读数不可信就【盲走】，而不是「不走」。
+	 *    读数大于上限         -> 测的是远处的东西，不能信
+	 *    读数小于目标距离     -> 可能已经到位，也可能测错了；
+	 *                           分不清，所以宁可走完盲走距离（宁远勿近，
+	 *                           远了下轮可以退回来，近了勾不到） */
+	if (d0 > FLY_PULL_TOF_TRUST_MAX_MM)
+	{
+		goto blind;
+	}
 	if (d0 <= g_fly_grab_dist_mm)
 	{
-		osDelay(FLY_FLOW_STEP_GAP_MS);
-		return 0U;
+		goto blind;
 	}
 
 	/* ---- 第一段：粗走，一次走掉大部分行程 ----
@@ -2425,9 +2482,21 @@ static uint8_t Fly_PullApproachBox(void)
 
 	/* 精走的预算 = 总接近上限 - 粗走已用
 	 * ★ 这是为了让「箱子比粗走限幅更远」时精走还能继续往前走，
-	 *   而不是像以前那样卡在 110mm 就停。 */
+	 *   而不是像以前那样卡在 110mm 就停。
+	 *
+	 * ★★ 预算为 0 时【必须跳过精走】，不能照发 ★★
+	 *   Fly_TofFeedLoop 里把 max_travel=0 解释成「用默认 1500mm」，
+	 *   所以传 0 进去等于放它再走 1.5 米 —— 滑台早就顶到结构了。 */
 	fine_budget = (int32_t)FLY_PULL_TOF_APPROACH_MAX_MM - coarse_mm;
 	if (fine_budget < 0) { fine_budget = 0; }
+
+	if (fine_budget < (int32_t)FLY_TOF_CHUNK_MM)
+	{
+		/* 粗走已经吃掉全部预算：没有任何精走余地，直接结束。
+		 * 走到这里说明「箱子比滑台行程还远」，激光再准也够不到。 */
+		g_fly_flow_why = FLY_WHY_TOF_STALL;
+		return 0U;
+	}
 
 	if (coarse_mm > 0)
 	{
@@ -2469,7 +2538,7 @@ static uint8_t Fly_PullApproachBox(void)
 	moved_fwd = (s_ax[FLY_AXIS_SLIDE].pos - pos_before)
 	          * (int32_t)FLY_DIR_SIGN_OF(FLY_AXIS_SLIDE);
 
-	remain = (int32_t)FLY_PULL_SLIDE_FWD_UNITS - moved_fwd;
+	remain = (int32_t)g_fly_pull_fwd_mm * (int32_t)FLY_UNITS_PER_MM - moved_fwd;
 
 	/* 记下是哪种失败，用户能在 0x7E3 帧 B5 的 [4] 看到 */
 	g_fly_flow_why = (r == FLY_TOF_ERR_STALL) ? FLY_WHY_TOF_STALL : FLY_WHY_NO_TOF;
@@ -2497,9 +2566,10 @@ static uint8_t Fly_PullApproachBox(void)
 	return 0U;
 
 blind:
-	/* ---- 兜底：按以前的固定距离盲走 ---- */
+	/* ---- 兜底：固定距离盲走（距离可用 0x111 [0x11] 现场调）---- */
 	g_fly_flow_why = FLY_WHY_NO_TOF;
-	return Fly_DoStep(2U, FLY_AXIS_SLIDE, (int32_t)FLY_PULL_SLIDE_FWD_UNITS, 0U);
+	return Fly_DoStep(2U, FLY_AXIS_SLIDE,
+	                  (int32_t)g_fly_pull_fwd_mm * (int32_t)FLY_UNITS_PER_MM, 0U);
 #endif
 }
 

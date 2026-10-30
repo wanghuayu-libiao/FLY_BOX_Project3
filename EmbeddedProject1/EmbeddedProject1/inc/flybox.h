@@ -114,7 +114,7 @@ typedef enum
  *      M1 左皮带    方向反了   -> -1   （2026-10-29 第二次修正：原 +1 实测反向）
  *      M2 右皮带    方向反了   -> +1   （2026-10-29 第二次修正：原 -1 实测反向）
  *      M3 平台前后  方向反了   -> -1
- *      M4 平台旋转  方向正确   -> +1
+ *      M4 平台旋转  方向反了   -> -1   （2026-10-30 修正：原 +1，实测转向不对）
  *      M5 抓钩      方向反了   -> -1
  *
  *  ★ 怎么改：换电机/换接线后重新点动一次，看哪个反向就翻哪个的符号。
@@ -128,7 +128,7 @@ typedef enum
 #define FLY_DIR_SIGN_BELT_L             (-1)
 #define FLY_DIR_SIGN_BELT_R             (+1)
 #define FLY_DIR_SIGN_SLIDE              (-1)
-#define FLY_DIR_SIGN_SWING              (+1)
+#define FLY_DIR_SIGN_SWING              (-1)
 #define FLY_DIR_SIGN_HOOK               (-1)
 
 /** @brief 取某轴的逻辑方向符号 */
@@ -337,7 +337,16 @@ typedef enum
  * ========================================================================= */
 
 /* ---- M3 前后轴：零点 = 完全缩回，只允许向前伸出 ---- */
-#define FLY_SLIDE_TRAVEL_MM             400.0f  /* ★TODO 实测前伸最大行程 */
+/* ★★★ 2026-10-30：行程从 400 提到 700 ★★★
+ *
+ *   现场需要前伸 600mm，而原来估的 400mm 会让软限位（关掉盲走之后）
+ *   把正常动作误判成越界。所以行程必须大于 600mm，留 100mm 余量。
+ *
+ *   ★★ 这个值定错了的后果（FLY_IGNORE_LIMITS=0 时）★★
+ *     偏小 -> 正常动作被拒（「走一步就停」）
+ *     偏大 -> 走过头时软限位搂不住，硬顶结构
+ *     所以关掉盲走前，必须先用尺子量一次滑台最大行程。 */
+#define FLY_SLIDE_TRAVEL_MM             700.0f  /* 前伸最大行程（> 600mm 需求）*/
 #define FLY_SLIDE_BACK_MARGIN_MM        2.0f    /* 零点往后再留这点余量（怕刚好压死）*/
 #define FLY_SLIDE_MIN_UNITS             (-(int32_t)(FLY_SLIDE_BACK_MARGIN_MM * FLY_UNITS_PER_MM))
 #define FLY_SLIDE_MAX_UNITS             ((int32_t)(FLY_SLIDE_TRAVEL_MM * FLY_UNITS_PER_MM))
@@ -361,9 +370,9 @@ typedef enum
  *   系数错 10 倍时限位也会错 10 倍 —— 所以必须先把系数标定准，再信任限位。 */
 
 /* 单次点动距离上限（mm）：防止手滑发个 100000 直接撞结构
- * ★ 换算成单位后是 FLY_JOG_MAX_MM × FLY_UNITS_PER_MM = 40000 单位。
+ * ★ 2026-10-30：从 400 提到 700，因为拉箱前伸已经需要 600mm 了。
  *   这个限幅是【最后一道兜底】，正常情况下应该由流程参数和软限位先挡住。 */
-#define FLY_JOG_MAX_MM                  400U
+#define FLY_JOG_MAX_MM                  700U
 
 /* =========================================================================
  *        4.15 ★★ 业务流程参数：拉箱 / 推箱（相对位移，不依赖绝对零点）
@@ -387,7 +396,17 @@ typedef enum
  * ========================================================================= */
 
 /* ---- 各步的物理位移量 ---- */
-#define FLY_PULL_SLIDE_FWD_MM           300.0f  /* 平台前伸到抓取位（盲走兼兜底用）*/
+/* ★★★ 2026-10-30 第三次修正：380 -> 600 ★★★
+ *
+ *   现场实测：380mm 还不够，箱子在更远处（用户给出 600mm）。
+ *
+ *   ★ 这意味着滑台的物理行程至少要 600mm，
+ *     而 FLY_SLIDE_TRAVEL_MM 现在写的是 400mm（估计值）。
+ *     两者不一致会让软限位算错，所以下面两个一起改。
+ *
+ *   ★ 600mm 已经超过 FLY_JOG_MAX_MM(400) 的单次限幅，
+ *     所以代码里会自动拆成两段走（已经有分组逻辑）。 */
+#define FLY_PULL_SLIDE_FWD_MM           600.0f  /* 平台前伸到抓取位 */
 #define FLY_PULL_SLIDE_BACK_MM          FLY_PULL_SLIDE_FWD_MM   /* 拖回同样距离 */
 #define FLY_HOOK_DEG                    90.0f   /* 抓钩抬起 / 放回 90° */
 #define FLY_SWING_DEG                   90.0f   /* 平台右转让位 / 转回 90° */
@@ -496,6 +515,12 @@ typedef enum
 
 /* 靠近过程的总超时（粗走 + 精走）*/
 #define FLY_PULL_TOF_TIMEOUT_MS         30000U
+
+/* ★★★ TOF 读数可信上限（mm）★★★
+ *
+ *   超过这个值就当成「测的是墙/空处」而不是箱子，直接盲走。
+ *   理由：我们要靠近的目标在厘米级，读数到米级肯定是看错了东西。 */
+#define FLY_PULL_TOF_TRUST_MAX_MM       1500U
 
 /* 靠近速度（指令单位/s）：6000 = 60mm/s。
  * ★ 粗走用 FLY_FLOW_SPEED 更快，这个用于精走。 */
@@ -885,6 +910,14 @@ typedef enum
                                                  *   立即回一帧 0x7E3 魔数 0xB7，
                                                  *   把「设备号映射 / 应答计数 / 是否有数据 / 当前距离」
                                                  *   全部倒出来，用来判断激光到底在不在总线上。 */
+#define FLY_CMD_PULL_FWD                0x11U   /* ★ 拉箱前伸距离（mm）：[1..2] u16LE
+                                                 *
+                                                 *   ★ 这是【不用重编烧录】调距离的入口。
+                                                 *     激光靠不住的时候，直接用它把前伸定死：
+                                                 *       0x111 [0x11, 0x7C, 0x01]  = 380mm
+                                                 *       0x111 [0x11, 0xF4, 0x01]  = 500mm
+                                                 *     回复帧 0x7E3 魔数 0xB8。
+                                                 *   ★ 只存 RAM，上电回到 FLY_PULL_SLIDE_FWD_MM。 */
 
 /* 0x05 语义动作码 */
 #define FLY_ACT_HOOK_UP                 0x01U   /* M5 抓钩抬起 90°（钩住） */
@@ -1314,6 +1347,14 @@ extern volatile uint16_t g_fly_grab_dist_mm;
 extern volatile uint8_t  g_fly_learn_req;
 extern volatile uint8_t  g_fly_tofhealth_req;
 
+/* ★ 拉箱前伸距离（mm）—— 盲走与总行程都用它
+ *
+ *   为什么做成变量：现场不知道箱子到底在多少 mm 外，
+ *   而每次改宏都要重新编译烧录（一分多钟）。
+ *   做成变量后可以直接发 0x111 [0x11, lo, hi] 当场改。
+ * 定下来之后把宏 FLY_PULL_SLIDE_FWD_MM 改成那个值。 */
+extern volatile uint16_t g_fly_pull_fwd_mm;
+
 /**
   * @brief  ★ 学习抓取距离：把当前 TOF 读数记为「钩子刚好能勾住」的距离
   *
@@ -1349,6 +1390,12 @@ uint8_t Fly_LearnGrabDist(void);
   *     [6..7] 当前距离 mm（u16 小端，0xFFFF/9999 = 无效）
   */
 void Fly_SendTofHealth(void);
+
+/**
+  * @brief  前伸距离回复帧（0x7E3，魔数 0xB8）
+  *   [2..3] 拉箱前伸距离 mm    [4..5] 抓取距离 mm
+  */
+void Fly_SendPullFwdReport(void);
 
 /* ---- Watch 变量 ---- */
 extern volatile uint8_t  g_fly_scan_cnt;
